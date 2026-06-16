@@ -1,0 +1,56 @@
+name: lifestack
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: lifestack-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-lifestack}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-lifestack}
+      POSTGRES_DB: ${POSTGRES_DB:-lifestack}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-lifestack} -d ${POSTGRES_DB:-lifestack}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build: ./backend
+    container_name: lifestack-backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      BACKEND_PORT: ${BACKEND_PORT:-4000}
+      DATABASE_URL: ${DATABASE_URL:-postgres://lifestack:lifestack@postgres:5432/lifestack}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      SEED_DEMO: ${SEED_DEMO:-true}
+      TRAKT_CLIENT_ID: ${TRAKT_CLIENT_ID:-}
+      TRAKT_ACCESS_TOKEN: ${TRAKT_ACCESS_TOKEN:-}
+      TIBBER_TOKEN: ${TIBBER_TOKEN:-}
+    ports:
+      - "${BACKEND_PORT:-4000}:4000"
+
+  frontend:
+    build: ./frontend
+    container_name: lifestack-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    environment:
+      NODE_ENV: production
+      PORT: ${FRONTEND_PORT:-3000}
+      BACKEND_URL: ${BACKEND_URL:-http://backend:4000}
+      ORIGIN: ${ORIGIN:-http://localhost:3000}
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+
+volumes:
+  postgres-data:
