@@ -91,7 +91,7 @@ in through **connectors** (pluggable sources). Ships with six modules:
 | **Finance**     | Bank transfers       | Assistant screenshot import | Monthly cash flow, spend by category, balance trend, top merchants |
 | **Energy**      | Home electricity     | Tibber (API), assistant     | kWh per month, day vs night split, cost, usage calendar |
 | **Fuel**        | Fuel consumption     | Assistant screenshot import | L/100km economy, price/L trend, cost per month, total spend |
-| **Mobility**    | Scooter & rides      | Assistant screenshot import | Rides per provider, spend, distance, monthly trend |
+| **Mobility**    | Scooter & rides      | Assistant screenshot import | Branded provider split (Uber/Bolt/Lime/Tier), ride type split (taxi/scooter/bike), spend, distance, monthly trend |
 | **Food orders** | Delivery takeout     | Assistant screenshot import | Orders this month, spend this month, average order value, provider split, spend per month, recent orders |
 
 The **Trakt** connector performs a **full sync**: watch history (movies and episodes),

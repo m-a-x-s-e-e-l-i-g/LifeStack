@@ -1,9 +1,27 @@
 import type { LifeStackModule } from "../../core/types";
 
+const providerLabelExpr = `multiIf(
+  lowerUTF8(provider) LIKE '%uber%', 'Uber 🚕',
+  lowerUTF8(provider) LIKE '%bolt%', 'Bolt ⚡',
+  lowerUTF8(provider) LIKE '%lime%', 'Lime 🛴',
+  lowerUTF8(provider) LIKE '%tier%', 'Tier 🛴',
+  lowerUTF8(provider) LIKE '%bird%', 'Bird 🛴',
+  lowerUTF8(provider) LIKE '%lyft%', 'Lyft 🚕',
+  provider
+)`;
+
+const rideTypeLabelExpr = `multiIf(
+  lowerUTF8(type) LIKE '%scooter%', 'Scooter 🛴',
+  lowerUTF8(type) IN ('bike', 'bicycle', 'ebike', 'e-bike', 'cycle'), 'Bike 🚲',
+  lowerUTF8(type) IN ('taxi', 'car', 'ride', 'cab'), 'Taxi 🚕',
+  type
+)`;
+
 const mobility: LifeStackModule = {
   id: "mobility",
   name: "Mobility",
-  description: "Scooter and ride-hail trips across Uber, Bolt, Lime, and Tier.",
+  description:
+    "Scooter and ride-hail trips across Uber, Bolt, Lime, Tier, and similar providers.",
   icon: "🛴",
   accent: "oklch(0.68 0.15 250)",
   migrations: [
@@ -64,8 +82,26 @@ const mobility: LifeStackModule = {
       featured: true,
       async query(ctx) {
         const rows = await ctx.db.query(
-          `SELECT provider AS label, toInt32(count()) AS value
-           FROM mobility_ride GROUP BY provider ORDER BY value DESC`,
+          `SELECT ${providerLabelExpr} AS label, toInt32(count()) AS value
+           FROM mobility_ride
+           GROUP BY label
+           ORDER BY value DESC`,
+        );
+        return { slices: rows, unit: "rides" };
+      },
+    },
+    {
+      id: "by-type",
+      title: "Rides by type",
+      type: "donut",
+      size: "md",
+      featured: true,
+      async query(ctx) {
+        const rows = await ctx.db.query(
+          `SELECT ${rideTypeLabelExpr} AS label, toInt32(count()) AS value
+           FROM mobility_ride
+           GROUP BY label
+           ORDER BY value DESC`,
         );
         return { slices: rows, unit: "rides" };
       },
@@ -105,14 +141,22 @@ const mobility: LifeStackModule = {
       size: "md",
       async query(ctx) {
         const rows = await ctx.db.query(
-          `SELECT toString(day) AS date, provider, distance_km AS distance,
-                  duration_min AS minutes, round(cost, 2) AS cost
-           FROM mobility_ride ORDER BY day DESC LIMIT 12`,
+          `SELECT
+             toString(day) AS date,
+             ${providerLabelExpr} AS provider,
+             ${rideTypeLabelExpr} AS ride_type,
+             distance_km AS distance,
+             duration_min AS minutes,
+             round(cost, 2) AS cost
+           FROM mobility_ride
+           ORDER BY day DESC
+           LIMIT 12`,
         );
         return {
           columns: [
             { key: "date", label: "Date" },
             { key: "provider", label: "Provider" },
+            { key: "ride_type", label: "Type" },
             { key: "distance", label: "km", align: "right" },
             { key: "minutes", label: "Min", align: "right" },
             { key: "cost", label: "Cost", format: "currency", align: "right" },

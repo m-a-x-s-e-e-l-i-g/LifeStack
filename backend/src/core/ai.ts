@@ -224,6 +224,38 @@ function day(value: unknown): string {
   return d.toISOString().slice(0, 10);
 }
 
+function normalizeProviderName(value: unknown): string {
+  const raw = String(value ?? "").trim();
+  const v = raw.toLowerCase();
+  if (!v) return "Unknown";
+  if (v.includes("uber")) return "Uber";
+  if (v.includes("bolt")) return "Bolt";
+  if (v.includes("lime")) return "Lime";
+  if (v.includes("tier")) return "Tier";
+  if (v.includes("bird")) return "Bird";
+  if (v.includes("lyft")) return "Lyft";
+  return raw;
+}
+
+function normalizeRideType(rawType: unknown, provider: string): string {
+  const t = String(rawType ?? "").trim().toLowerCase();
+  const p = provider.toLowerCase();
+  if (t.includes("scooter") || p.includes("lime") || p.includes("tier") || p.includes("bird"))
+    return "scooter";
+  if (t.includes("bike") || t.includes("bicycle") || t.includes("cycle")) return "bike";
+  if (
+    t.includes("taxi") ||
+    t.includes("cab") ||
+    t.includes("car") ||
+    t.includes("ride") ||
+    p.includes("uber") ||
+    p.includes("bolt") ||
+    p.includes("lyft")
+  )
+    return "taxi";
+  return t || "ride";
+}
+
 function stableHash(target: WriteTarget, row: Record<string, unknown>): string {
   const ordered = Object.keys(row)
     .sort()
@@ -235,10 +267,11 @@ function stableHash(target: WriteTarget, row: Record<string, unknown>): string {
 
 function normalizeRow(target: WriteTarget, raw: Record<string, unknown>): Record<string, unknown> {
   if (target === "mobility_ride") {
+    const provider = normalizeProviderName(raw.provider ?? raw.app ?? raw.service);
     return {
       day: day(raw.day ?? raw.date),
-      provider: String(raw.provider ?? "Unknown"),
-      type: String(raw.type ?? "ride"),
+      provider,
+      type: normalizeRideType(raw.type ?? raw.vehicle, provider),
       distance_km: num(raw.distance_km ?? raw.distance ?? raw.km),
       duration_min: int(raw.duration_min ?? raw.duration ?? raw.minutes),
       cost: num(raw.cost ?? raw.amount ?? raw.price),
@@ -546,6 +579,7 @@ Rules:
 - To get any number, call run_sql. Never invent values; if a query returns no rows, say the data is not there yet.
 - For screenshot imports, extract structured entries and call write_records with the correct target table and rows.
 - Food delivery screenshots (Uber Eats, takeaway.com, thuisbezorgd) should be written to food_order.
+- Mobility screenshots should normalize provider names (Uber, Bolt, Lime, Tier, Bird, Lyft) and set type to taxi, scooter, or bike.
 - Only modify data when the user explicitly asks, use write_records to add rows and delete_records to remove rows.
 - ClickHouse dialect: use today(), now(), toStartOfMonth(x), toYYYYMM(x), formatDateTime(x, '%b'), countIf(cond), sumIf(x, cond), uniqExact(x), arrayJoin(arr). Date math uses INTERVAL, e.g. today() - INTERVAL 12 MONTH.
 - Tables holding deduplicated entities use ReplacingMergeTree; add FINAL after the table name (e.g. FROM watch_history FINAL) so re-synced rows are not double counted.
