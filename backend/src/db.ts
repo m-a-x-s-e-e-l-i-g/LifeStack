@@ -114,6 +114,15 @@ export async function runCoreMigrations(): Promise<void> {
       inserted Int64,
       message String
     ) ENGINE = MergeTree ORDER BY (module_id, finished_at)`);
+
+  // AI-assisted ingestion dedupe ledger. Each normalized row hash is recorded
+  // per target table so repeated screenshot uploads do not create duplicates.
+  await command(`CREATE TABLE IF NOT EXISTS ai_ingest_dedupe (
+      target String,
+      hash String,
+      payload String,
+      created_at DateTime DEFAULT now()
+    ) ENGINE = ReplacingMergeTree(created_at) ORDER BY (target, hash)`);
 }
 
 /** Apply a module's DDL statements idempotently, tracked by content hash. */

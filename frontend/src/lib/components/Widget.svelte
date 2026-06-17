@@ -58,7 +58,7 @@
     {#if widget.error}
       <p class="note err">Could not load: {widget.error}</p>
     {:else if empty}
-      <p class="note">No data yet. Connect a source or import a file to populate this.</p>
+      <p class="note">No data yet. Connect a source or add records via the assistant.</p>
     {:else if widget.type === "metric"}
       <Metric data={d} {accent} />
     {:else if widget.type === "statpanel"}

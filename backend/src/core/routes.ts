@@ -9,7 +9,6 @@ import {
   isConnectorEnabled,
   isModuleEnabled,
   lastSync,
-  runConnectorImport,
   runConnectorSync,
   runConnectorAuthorize,
   setConnectorConfig,
@@ -210,17 +209,6 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         .code(502)
         .send({ ok: false, error: err instanceof Error ? err.message : String(err) });
     }
-  });
-
-  app.post<{
-    Params: { id: string; cid: string };
-    Body: { rows?: unknown[] };
-  }>("/api/modules/:id/connectors/:cid/import", async (req, reply) => {
-    const r = await resolve(req.params.id, req.params.cid, reply);
-    if (!r) return;
-    if (!r.c.import) return reply.code(400).send({ error: "connector has no import" });
-    const rows = Array.isArray(req.body?.rows) ? req.body!.rows : [];
-    return { ok: true, ...(await runConnectorImport(r.m, r.c, rows)) };
   });
 
   app.get("/api/overview", async () => {

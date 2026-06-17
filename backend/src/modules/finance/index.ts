@@ -1,26 +1,6 @@
-import type { Connector, LifeStackModule } from "../../core/types";
+import type { LifeStackModule } from "../../core/types";
 
 const round2 = (n: number): number => Math.round(n * 100) / 100;
-
-const csv: Connector = {
-  id: "csv",
-  name: "CSV / JSON import",
-  description:
-    "Import a bank export. Rows: {day, description, category, amount} (negative = expense).",
-  kind: "import",
-  async import(ctx, rows) {
-    const values = rows
-      .filter((r): r is Record<string, unknown> => typeof r === "object" && r !== null)
-      .map((r) => ({
-        day: String(r.day ?? r.date ?? new Date().toISOString()).slice(0, 10),
-        description: String(r.description ?? "Imported"),
-        category: String(r.category ?? "Uncategorized"),
-        amount: Number(r.amount ?? 0),
-      }));
-    await ctx.db.insert("finance_tx", values);
-    return { inserted: values.length };
-  },
-};
 
 const finance: LifeStackModule = {
   id: "finance",
@@ -36,7 +16,7 @@ const finance: LifeStackModule = {
        amount Float64
      ) ENGINE = MergeTree ORDER BY day`,
   ],
-  connectors: [csv],
+  connectors: [],
   widgets: [
     {
       id: "net-month",

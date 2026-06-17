@@ -1,12 +1,14 @@
-import { client, getMeta, setMeta } from "../db";
+import { createHash } from "node:crypto";
+import { client, getMeta, insert, query, setMeta } from "../db";
 import { env } from "../env";
 import { logger } from "../logger";
 
 /**
  * Chat-first assistant. Provider agnostic: talks to any OpenAI-compatible
  * /chat/completions endpoint (OpenAI, Ollama /v1, LM Studio, vLLM, ...).
- * The model answers questions about the user's data through a single
- * read-only SQL tool over ClickHouse, plus a schema description in the prompt.
+ *
+ * It can read data via SQL and, when explicitly requested by the user, ingest
+ * structured records into local tables (for example from screenshots).
  */
 
 const log = logger.child("ai");
@@ -17,6 +19,7 @@ const CORE_TABLES = new Set([
   "connector_state",
   "schema_migrations",
   "sync_log",
+  "ai_ingest_dedupe",
 ]);
 
 export interface AiConfig {
@@ -134,9 +137,16 @@ export async function runReadonlySql(
   return { rows };
 }
 
+export interface ChatAttachment {
+  name?: string | null;
+  mime: string;
+  dataUrl: string;
+}
+
 export interface ChatMessage {
   role: "system" | "user" | "assistant" | "tool";
   content?: string | null;
+  attachments?: ChatAttachment[];
   tool_calls?: unknown;
   tool_call_id?: string;
 }
@@ -149,7 +159,7 @@ export interface ChatStep {
 
 interface ModelMessage {
   role: string;
-  content: string | null;
+  content: unknown;
   tool_calls?: Array<{
     id: string;
     type: string;
@@ -159,6 +169,7 @@ interface ModelMessage {
 
 async function callModel(
   cfg: AiConfig,
+  model: string,
   messages: unknown[],
   tools: unknown[],
 ): Promise<ModelMessage> {
@@ -169,7 +180,7 @@ async function callModel(
       ...(cfg.apiKey ? { Authorization: `Bearer ${cfg.apiKey}` } : {}),
     },
     body: JSON.stringify({
-      model: cfg.model,
+      model,
       messages,
       tools,
       tool_choice: "auto",
@@ -187,6 +198,141 @@ async function callModel(
   const msg = json.choices?.[0]?.message;
   if (!msg) throw new Error("LLM returned no message");
   return msg;
+}
+
+type WriteTarget = "mobility_ride" | "finance_tx" | "fuel_fillup" | "energy_reading";
+
+function num(value: unknown, fallback = 0): number {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function int(value: unknown, fallback = 0): number {
+  return Math.round(num(value, fallback));
+}
+
+function day(value: unknown): string {
+  const s = String(value ?? "").trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  const d = new Date(s);
+  if (Number.isNaN(d.getTime())) return new Date().toISOString().slice(0, 10);
+  return d.toISOString().slice(0, 10);
+}
+
+function stableHash(target: WriteTarget, row: Record<string, unknown>): string {
+  const ordered = Object.keys(row)
+    .sort()
+    .map((k) => [k, row[k]]);
+  return createHash("sha1")
+    .update(`${target}:${JSON.stringify(ordered)}`)
+    .digest("hex");
+}
+
+function normalizeRow(target: WriteTarget, raw: Record<string, unknown>): Record<string, unknown> {
+  if (target === "mobility_ride") {
+    return {
+      day: day(raw.day ?? raw.date),
+      provider: String(raw.provider ?? "Unknown"),
+      type: String(raw.type ?? "ride"),
+      distance_km: num(raw.distance_km ?? raw.distance ?? raw.km),
+      duration_min: int(raw.duration_min ?? raw.duration ?? raw.minutes),
+      cost: num(raw.cost ?? raw.amount ?? raw.price),
+    };
+  }
+  if (target === "finance_tx") {
+    return {
+      day: day(raw.day ?? raw.date),
+      description: String(raw.description ?? raw.note ?? "AI import"),
+      category: String(raw.category ?? raw.type ?? "Uncategorized"),
+      amount: num(raw.amount ?? raw.cost ?? raw.value),
+    };
+  }
+  if (target === "fuel_fillup") {
+    const liters = num(raw.liters ?? raw.volume);
+    const ppl = num(raw.price_per_liter ?? raw.pricePerLiter ?? raw.unit_price);
+    return {
+      day: day(raw.day ?? raw.date),
+      liters,
+      price_per_liter: ppl,
+      cost: num(raw.cost ?? liters * ppl),
+      odometer: int(raw.odometer ?? raw.km_total ?? 0),
+    };
+  }
+  return {
+    day: day(raw.day ?? raw.date),
+    day_kwh: num(raw.day_kwh ?? raw.dayKwh ?? raw.kwh ?? 0),
+    night_kwh: num(raw.night_kwh ?? raw.nightKwh ?? 0),
+    cost: num(raw.cost ?? raw.amount ?? 0),
+  };
+}
+
+async function writeRecords(
+  target: WriteTarget,
+  rowsInput: unknown[],
+): Promise<Record<string, unknown>> {
+  if (!Array.isArray(rowsInput)) throw new Error("rows must be an array");
+  const normalized: Record<string, unknown>[] = [];
+  let rejected = 0;
+
+  for (const raw of rowsInput) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      rejected++;
+      continue;
+    }
+    normalized.push(normalizeRow(target, raw as Record<string, unknown>));
+  }
+
+  if (normalized.length === 0) {
+    return {
+      target,
+      inserted: 0,
+      skippedDuplicates: 0,
+      rejected,
+      message: "No valid rows were provided.",
+    };
+  }
+
+  const hashes = normalized.map((r) => stableHash(target, r));
+  const seenRows = await query<{ hash: string }>(
+    `SELECT hash FROM ai_ingest_dedupe FINAL
+     WHERE target = {target:String} AND hash IN {hashes:Array(String)}`,
+    { target, hashes },
+  );
+  const seen = new Set(seenRows.map((r) => r.hash));
+
+  const toInsert: Record<string, unknown>[] = [];
+  const dedupeRows: Record<string, unknown>[] = [];
+  let skippedDuplicates = 0;
+
+  for (let i = 0; i < normalized.length; i++) {
+    const row = normalized[i];
+    const hash = hashes[i];
+    if (seen.has(hash)) {
+      skippedDuplicates++;
+      continue;
+    }
+    seen.add(hash);
+    toInsert.push(row);
+    dedupeRows.push({
+      target,
+      hash,
+      payload: JSON.stringify(row),
+      created_at: new Date().toISOString(),
+    });
+  }
+
+  if (toInsert.length > 0) {
+    await insert(target, toInsert);
+    await insert("ai_ingest_dedupe", dedupeRows);
+  }
+
+  return {
+    target,
+    inserted: toInsert.length,
+    skippedDuplicates,
+    rejected,
+    message: `Saved ${toInsert.length} row(s) to ${target}; skipped ${skippedDuplicates} duplicate(s).`,
+  };
 }
 
 const TOOLS = [
@@ -209,11 +355,35 @@ const TOOLS = [
       },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "write_records",
+      description:
+        "Insert structured records into a local LifeStack table. Use this only when the user explicitly asks to save/import data (for example from screenshots).",
+      parameters: {
+        type: "object",
+        properties: {
+          target: {
+            type: "string",
+            enum: ["mobility_ride", "finance_tx", "fuel_fillup", "energy_reading"],
+            description: "Target local table for the new records.",
+          },
+          rows: {
+            type: "array",
+            description: "Array of row objects extracted from user-provided input.",
+            items: { type: "object", additionalProperties: true },
+          },
+        },
+        required: ["target", "rows"],
+      },
+    },
+  },
 ];
 
 function systemPrompt(schema: string): string {
   const today = new Date().toISOString().slice(0, 10);
-  return `You are the analyst inside LifeStack, a self-hosted personal statistics app. You answer questions about the user's own data by querying a ClickHouse database with the run_sql tool.
+  return `You are the analyst inside LifeStack, a self-hosted personal statistics app. You can answer questions and, when the user asks to import data, save structured records.
 
 Today is ${today} (UTC).
 
@@ -222,10 +392,40 @@ ${schema}
 
 Rules:
 - To get any number, call run_sql. Never invent values; if a query returns no rows, say the data is not there yet.
+- For screenshot imports, extract structured entries and call write_records with the correct target table and rows.
+- Only write when the user explicitly asks to save/import data.
 - ClickHouse dialect: use today(), now(), toStartOfMonth(x), toYYYYMM(x), formatDateTime(x, '%b'), countIf(cond), sumIf(x, cond), uniqExact(x), arrayJoin(arr). Date math uses INTERVAL, e.g. today() - INTERVAL 12 MONTH.
 - Tables holding deduplicated entities use ReplacingMergeTree; add FINAL after the table name (e.g. FROM watch_history FINAL) so re-synced rows are not double counted.
 - Keep queries focused and always include a LIMIT for row listings.
 - Reply in concise prose. Lead with the answer and the key number. Do not show SQL unless asked; the app already displays the queries you ran.`;
+}
+
+function asText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  const parts = content
+    .map((p) => {
+      if (!p || typeof p !== "object") return "";
+      const t = (p as { type?: string }).type;
+      if (t === "text" || t === "input_text") return String((p as { text?: string }).text ?? "");
+      return "";
+    })
+    .filter(Boolean);
+  return parts.join("\n").trim();
+}
+
+function toUserContent(m: ChatMessage): unknown {
+  const images = (m.attachments ?? []).filter(
+    (a) => typeof a.dataUrl === "string" && /^data:image\//.test(a.dataUrl),
+  );
+  if (images.length === 0) return m.content ?? "";
+  const parts: Array<Record<string, unknown>> = [];
+  if (m.content?.trim()) parts.push({ type: "text", text: m.content.trim() });
+  for (const img of images) {
+    parts.push({ type: "image_url", image_url: { url: img.dataUrl } });
+  }
+  if (parts.length === 0) parts.push({ type: "text", text: "Analyze this screenshot." });
+  return parts;
 }
 
 export async function chat(
@@ -246,17 +446,60 @@ export async function chat(
     { role: "system", content: systemPrompt(schema) },
     ...incoming
       .filter((m) => m.role === "user" || m.role === "assistant")
-      .map((m) => ({ role: m.role, content: m.content ?? "" })),
+      .map((m) => ({
+        role: m.role,
+        content: m.role === "user" ? toUserContent(m) : (m.content ?? ""),
+      })),
   ];
 
   const steps: ChatStep[] = [];
+  const hasImages = incoming.some(
+    (m) => m.role === "user" && Array.isArray(m.attachments) && m.attachments.length > 0,
+  );
+  const modelCandidates = (
+    hasImages && /api\.openai\.com/i.test(cfg.baseUrl)
+      ? [cfg.model, "gpt-4.1-mini", "gpt-4o-mini"]
+      : [cfg.model]
+  ).filter((m, i, all) => !!m && all.indexOf(m) === i);
 
-  for (let i = 0; i < 6; i++) {
-    const msg = await callModel(cfg, convo, TOOLS);
+  const callModelWithFallback = async (): Promise<ModelMessage> => {
+    let lastError: Error | null = null;
+    for (const model of modelCandidates) {
+      try {
+        return await callModel(cfg, model, convo, TOOLS);
+      } catch (err) {
+        lastError = err instanceof Error ? err : new Error(String(err));
+        const msg = lastError.message.toLowerCase();
+        const maybeImageIssue =
+          msg.includes("image_parse_error") ||
+          msg.includes("unsupported image") ||
+          msg.includes("does not support image");
+        if (!maybeImageIssue) throw lastError;
+      }
+    }
+    throw lastError ?? new Error("LLM request failed");
+  };
+
+  for (let i = 0; i < 8; i++) {
+    let msg: ModelMessage;
+    try {
+      msg = await callModelWithFallback();
+    } catch (err) {
+      const text = err instanceof Error ? err.message : String(err);
+      if (hasImages && /image_parse_error|unsupported image|does not support image/i.test(text)) {
+        return {
+          configured: true,
+          steps,
+          reply:
+            "Your current model endpoint rejected the screenshot. Switch to a vision-capable OpenAI-compatible model in Settings, then upload again.",
+        };
+      }
+      throw err;
+    }
     convo.push(msg);
     const calls = msg.tool_calls ?? [];
     if (calls.length === 0) {
-      return { reply: msg.content ?? "", steps, configured: true };
+      return { reply: asText(msg.content), steps, configured: true };
     }
     for (const call of calls) {
       let content: string;
@@ -264,11 +507,28 @@ export async function chat(
       let stepRows: Record<string, unknown>[] | null = null;
       let stepError: string | null = null;
       try {
-        const args = JSON.parse(call.function.arguments || "{}") as { sql?: string };
-        stepSql = String(args.sql ?? "");
-        const out = await runReadonlySql(stepSql);
-        stepRows = out.rows;
-        content = JSON.stringify({ rowCount: out.rows.length, rows: out.rows.slice(0, 50) });
+        const args = JSON.parse(call.function.arguments || "{}") as {
+          sql?: string;
+          target?: WriteTarget;
+          rows?: unknown[];
+        };
+        if (call.function.name === "run_sql") {
+          stepSql = String(args.sql ?? "");
+          const out = await runReadonlySql(stepSql);
+          stepRows = out.rows;
+          content = JSON.stringify({ rowCount: out.rows.length, rows: out.rows.slice(0, 50) });
+        } else if (call.function.name === "write_records") {
+          const target = String(args.target ?? "") as WriteTarget;
+          if (!["mobility_ride", "finance_tx", "fuel_fillup", "energy_reading"].includes(target)) {
+            throw new Error("Unsupported write target");
+          }
+          const result = await writeRecords(target, Array.isArray(args.rows) ? args.rows : []);
+          stepSql = `write_records(${target})`;
+          stepRows = [result];
+          content = JSON.stringify(result);
+        } else {
+          throw new Error(`Unsupported tool: ${call.function.name}`);
+        }
       } catch (err) {
         stepError = err instanceof Error ? err.message : String(err);
         content = JSON.stringify({ error: stepError });
@@ -283,6 +543,6 @@ export async function chat(
     configured: true,
     steps,
     reply:
-      "I ran several queries but could not settle on an answer. Try asking something more specific.",
+      "I ran several queries/actions but could not settle on an answer. Try asking something more specific.",
   };
 }

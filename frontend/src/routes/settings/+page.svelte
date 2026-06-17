@@ -48,8 +48,8 @@
   <p class="eyebrow">Configuration</p>
   <h1>Modules &amp; connectors</h1>
   <p class="intro">
-    Each module owns a domain. Connectors feed it data: API sources sync automatically, while CSV and
-    manual connectors accept imports. Enable what you use, wire up credentials, and trigger a sync.
+    Each module owns a domain. Connectors feed it data and API sources sync automatically. You can also
+    add records through the assistant by uploading screenshots and asking it to save them.
   </p>
 </header>
 
@@ -65,8 +65,9 @@
           </span>
         </div>
         <p class="adesc">
-          Connect any OpenAI-compatible endpoint. LifeStack passes your table schema and runs the
-          model's read-only SQL against ClickHouse. Nothing is written back.
+          Connect any OpenAI-compatible endpoint. LifeStack passes your table schema and can run
+          read-only analysis queries, plus write deduped records into local tables when you explicitly
+          ask it to import data.
         </p>
       </div>
     </div>

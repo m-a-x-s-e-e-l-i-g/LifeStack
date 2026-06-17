@@ -1,7 +1,5 @@
 import type { Connector, LifeStackModule } from "../../core/types";
 
-const round2 = (n: number): number => Math.round(n * 100) / 100;
-
 const tibber: Connector = {
   id: "tibber",
   name: "Tibber",
@@ -55,29 +53,6 @@ const tibber: Connector = {
   },
 };
 
-const csv: Connector = {
-  id: "csv",
-  name: "CSV / JSON import",
-  description: "Import meter readings. Rows: {day, day_kwh, night_kwh, cost}.",
-  kind: "import",
-  async import(ctx, rows) {
-    const values = rows
-      .filter((r): r is Record<string, unknown> => typeof r === "object" && r !== null)
-      .map((r) => {
-        const dayKwh = Number(r.day_kwh ?? r.dayKwh ?? r.kwh ?? 0);
-        const nightKwh = Number(r.night_kwh ?? r.nightKwh ?? 0);
-        return {
-          day: String(r.day ?? r.date ?? new Date().toISOString()).slice(0, 10),
-          day_kwh: dayKwh,
-          night_kwh: nightKwh,
-          cost: Number(r.cost ?? round2(dayKwh * 0.3 + nightKwh * 0.21)),
-        };
-      });
-    await ctx.db.insert("energy_reading", values);
-    return { inserted: values.length };
-  },
-};
-
 const energy: LifeStackModule = {
   id: "energy",
   name: "Energy",
@@ -92,7 +67,7 @@ const energy: LifeStackModule = {
        cost Float64
      ) ENGINE = ReplacingMergeTree ORDER BY day`,
   ],
-  connectors: [tibber, csv],
+  connectors: [tibber],
   widgets: [
     {
       id: "kwh-month",

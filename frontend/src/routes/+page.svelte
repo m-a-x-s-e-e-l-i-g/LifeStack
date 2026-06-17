@@ -8,7 +8,13 @@
 
   let { data }: { data: PageData } = $props();
 
-  type Turn = { role: "user" | "assistant"; content: string; steps?: ChatStep[] };
+  type UploadImage = { name: string; mime: string; dataUrl: string };
+  type Turn = {
+    role: "user" | "assistant";
+    content: string;
+    steps?: ChatStep[];
+    attachments?: UploadImage[];
+  };
 
   let thread = $state<Turn[]>([]);
   let input = $state("");
@@ -16,6 +22,8 @@
   let errorText = $state<string | null>(null);
   let scroller: HTMLDivElement | null = $state(null);
   let box: HTMLTextAreaElement | null = $state(null);
+  let picker: HTMLInputElement | null = $state(null);
+  let pendingImages = $state<UploadImage[]>([]);
 
   const modules = $derived((($page.data.modules ?? []) as ModuleSummary[]).filter((m) => m.enabled));
 
@@ -24,7 +32,7 @@
     finance: "What were my biggest spending categories last month?",
     energy: "Show my electricity cost by month this year.",
     fuel: "What is my average fuel economy in L/100km?",
-    mobility: "Which mobility provider did I use most?",
+    mobility: "I uploaded an Uber receipt screenshot. Extract it and save it as mobility data.",
   };
 
   const suggestions = $derived(
@@ -46,17 +54,49 @@
     scroller?.scrollTo({ top: scroller.scrollHeight, behavior: "smooth" });
   }
 
+  function readAsDataUrl(file: File): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result ?? ""));
+      reader.onerror = () => reject(new Error("Could not read image"));
+      reader.readAsDataURL(file);
+    });
+  }
+
+  async function addImages(list: FileList | null) {
+    if (!list || !list.length || busy) return;
+    const files = [...list].filter((f) => f.type.startsWith("image/"));
+    if (files.length === 0) return;
+    const loaded: UploadImage[] = [];
+    for (const file of files.slice(0, 6)) {
+      const dataUrl = await readAsDataUrl(file);
+      loaded.push({ name: file.name, mime: file.type, dataUrl });
+    }
+    pendingImages = [...pendingImages, ...loaded].slice(0, 6);
+    if (picker) picker.value = "";
+  }
+
+  function removeImage(ix: number) {
+    pendingImages = pendingImages.filter((_, i) => i !== ix);
+  }
+
   async function send(text: string) {
     const content = text.trim();
-    if (!content || busy) return;
+    if ((!content && pendingImages.length === 0) || busy) return;
     errorText = null;
-    thread = [...thread, { role: "user", content }];
+    const userTurn: Turn = { role: "user", content, attachments: pendingImages };
+    thread = [...thread, userTurn];
     input = "";
+    pendingImages = [];
     if (box) box.style.height = "auto";
     busy = true;
     scrollDown();
     try {
-      const payload = thread.map((t) => ({ role: t.role, content: t.content }));
+      const payload = thread.map((t) => ({
+        role: t.role,
+        content: t.content,
+        ...(t.role === "user" && t.attachments?.length ? { attachments: t.attachments } : {}),
+      }));
       const res = await action<ChatResponse>("/chat", "POST", { messages: payload });
       thread = [...thread, { role: "assistant", content: res.reply, steps: res.steps }];
     } catch (e) {
@@ -78,6 +118,7 @@
     thread = [];
     errorText = null;
     input = "";
+    pendingImages = [];
   }
 
   function columns(rows: Record<string, unknown>[]): string[] {
@@ -119,8 +160,8 @@
         <div class="hero">
           <h1>Ask your data anything</h1>
           <p class="lede">
-            One assistant over every module. It writes read-only SQL against your ClickHouse store and
-            answers in plain language, with the queries it ran shown in full.
+            One assistant over every module. Ask questions, or upload screenshots from apps like Uber,
+            Bolt, and Lime to extract entries and save them directly into your local data stack.
           </p>
           {#if suggestions.length}
             <div class="suggest">
@@ -137,6 +178,13 @@
               <div class="turn user">
                 <p class="who">You</p>
                 <div class="said">{t.content}</div>
+                {#if t.attachments?.length}
+                  <div class="thumbs">
+                    {#each t.attachments as img, ii (img.dataUrl + ii)}
+                      <img class="thumb" src={img.dataUrl} alt={img.name || "Uploaded screenshot"} />
+                    {/each}
+                  </div>
+                {/if}
               </div>
             {:else}
               <div class="turn bot">
@@ -144,7 +192,7 @@
                 <div class="reply">{t.content}</div>
                 {#if t.steps && t.steps.length}
                   <details class="work" open={t.steps.some((s) => s.error)}>
-                    <summary>{t.steps.length} {t.steps.length === 1 ? "query" : "queries"}</summary>
+                    <summary>{t.steps.length} {t.steps.length === 1 ? "step" : "steps"}</summary>
                     {#each t.steps as step, si (si)}
                       <div class="step">
                         <pre class="sql">{step.sql}</pre>
@@ -206,7 +254,41 @@
           New chat
         </button>
       {/if}
+      {#if pendingImages.length}
+        <div class="pending">
+          {#each pendingImages as img, i (img.dataUrl + i)}
+            <div class="pending-item">
+              <img src={img.dataUrl} alt={img.name || "Screenshot"} />
+              <button
+                class="pending-remove"
+                type="button"
+                onclick={() => removeImage(i)}
+                aria-label="Remove screenshot"
+              >
+                ×
+              </button>
+            </div>
+          {/each}
+        </div>
+      {/if}
       <div class="field">
+        <input
+          bind:this={picker}
+          class="picker"
+          type="file"
+          accept="image/*"
+          multiple
+          onchange={(e) => addImages((e.currentTarget as HTMLInputElement).files)}
+        />
+        <button
+          class="attach"
+          type="button"
+          onclick={() => picker?.click()}
+          disabled={busy || pendingImages.length >= 6}
+          aria-label="Upload screenshots"
+        >
+          +
+        </button>
         <textarea
           bind:this={box}
           bind:value={input}
@@ -219,7 +301,7 @@
         <button
           class="send"
           onclick={() => send(input)}
-          disabled={busy || !input.trim()}
+          disabled={busy || (!input.trim() && pendingImages.length === 0)}
           aria-label="Send message"
         >
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -227,7 +309,10 @@
           </svg>
         </button>
       </div>
-      <p class="hint">Read-only. The assistant never writes to your data. Enter to send, Shift+Enter for a new line.</p>
+      <p class="hint">
+        Upload screenshots, ask for extraction, and the assistant can save deduped records to your local
+        database. Enter to send, Shift+Enter for a new line.
+      </p>
     </div>
   </div>
 </div>
@@ -357,6 +442,20 @@
     color: var(--text);
     white-space: pre-wrap;
     overflow-wrap: anywhere;
+  }
+  .thumbs {
+    margin-top: var(--s2);
+    display: flex;
+    gap: var(--s2);
+    flex-wrap: wrap;
+  }
+  .thumb {
+    width: 82px;
+    height: 82px;
+    object-fit: cover;
+    border-radius: var(--r-sm);
+    border: 1px solid var(--border);
+    background: var(--surface);
   }
   .reply {
     font-size: 15.5px;
@@ -527,6 +626,30 @@
     border-radius: var(--r-lg);
     transition: border-color 160ms ease;
   }
+  .picker {
+    display: none;
+  }
+  .attach {
+    flex: none;
+    display: grid;
+    place-items: center;
+    width: 38px;
+    height: 38px;
+    border-radius: var(--r);
+    border: 1px solid var(--border-strong);
+    background: var(--surface-2);
+    color: var(--text-dim);
+    font-size: 20px;
+    line-height: 1;
+  }
+  .attach:hover:not(:disabled) {
+    color: var(--text);
+    border-color: var(--brand);
+  }
+  .attach:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
   .field:focus-within {
     border-color: var(--brand);
   }
@@ -577,6 +700,39 @@
     margin: var(--s2) 0 0;
     font-size: 11.5px;
     color: var(--text-faint);
+  }
+  .pending {
+    display: flex;
+    gap: var(--s2);
+    flex-wrap: wrap;
+    margin: 0 0 var(--s2);
+  }
+  .pending-item {
+    position: relative;
+    width: 58px;
+    height: 58px;
+  }
+  .pending-item img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    border-radius: 7px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+  }
+  .pending-remove {
+    position: absolute;
+    top: -7px;
+    right: -7px;
+    width: 18px;
+    height: 18px;
+    border: 1px solid var(--border);
+    border-radius: 99px;
+    background: var(--bg-sunken);
+    color: var(--text-dim);
+    font-size: 12px;
+    line-height: 1;
+    padding: 0;
   }
 
   @media (max-width: 900px) {

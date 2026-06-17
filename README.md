@@ -32,8 +32,8 @@ price-per-liter trends; a finance module shows cash flow and category breakdowns
 platform, domain-appropriate stats.
 
 - **Local / self-hosted first.** Runs entirely on your hardware. ClickHouse holds the state.
-- **AI-first.** A chat assistant sits at the front door and answers questions by writing
-  read-only SQL against your own data. Point it at any OpenAI-compatible endpoint.
+- **AI-first.** A chat assistant sits at the front door, answers questions with SQL, and can
+  ingest records from screenshots into your local database when you ask it to.
 - **Modular.** Enable, disable, and configure modules at runtime. Write your own in one file.
 - **Docker-first.** Three services, one command, sensible defaults.
 - **No mock data.** Modules start empty and fill up only when you connect a real source.
@@ -51,8 +51,8 @@ Then open **http://localhost:3000**. You land on the **assistant**. It starts un
 so head to **Settings** to:
 
 1. Point the assistant at an LLM (a local Ollama, LM Studio, or a hosted provider).
-2. Enable the modules you want and connect a source (a Trakt token, a Tibber token, or a
-   CSV import).
+2. Enable the modules you want and connect a source (for example Trakt or Tibber). For
+   apps without APIs, upload screenshots in the assistant and ask it to save the entries.
 
 Until you connect a source, modules stay empty by design.
 
@@ -70,12 +70,12 @@ everything you have synced.
 - **Provider-agnostic.** It speaks the OpenAI `/chat/completions` protocol, so it works with
   OpenAI, a local **Ollama** (`/v1`), **LM Studio**, **vLLM**, and anything else compatible.
   Configure it in Settings or via `AI_BASE_URL` / `AI_MODEL` / `AI_API_KEY`.
-- **Grounded in your data.** The model is given your table schema and a single tool,
-  `run_sql`, that executes one **read-only** ClickHouse `SELECT` at a time. Every query it
-  runs is shown beneath the answer, so nothing is a black box.
-- **Safe by construction.** The SQL tool rejects anything that is not a single `SELECT` /
-  `WITH`, blocks DDL/DML, table functions, and `system.*` tables, forces a row limit, and
-  runs with `readonly=1`. The assistant can read your stats; it can never change them.
+- **Grounded in your data.** The model is given your table schema and tools for analysis
+  (`run_sql`) plus explicit imports (`write_records`). Every query and write action is shown
+  beneath the answer.
+- **Safe by construction.** SQL stays read-only (`SELECT` / `WITH` only, no table functions,
+  no `system.*`, forced limits, `readonly=1`). Writes are limited to local domain tables and
+  deduped by row hash, so re-uploading the same screenshot does not create double entries.
 
 Ask things like *"How many films and episodes did I watch this year?"*, *"What did I spend
 the most on last month?"*, or *"Show my electricity cost by month."*
@@ -87,17 +87,17 @@ in through **connectors** (pluggable sources). Ships with five modules:
 
 | Module          | Domain              | Connectors                  | Sample statistics |
 |-----------------|---------------------|-----------------------------|-------------------|
-| **Movies & TV** | Everything you watch | Trakt (API)                 | Watched summary (last 30 days and all time, shows and movies with watch time), unique titles, plays per month, watch calendar, top genres and shows, ratings, watchlist, collection |
-| **Finance**     | Bank transfers       | CSV / JSON import           | Monthly cash flow, spend by category, balance trend, top merchants |
-| **Energy**      | Home electricity     | Tibber (API), CSV import    | kWh per month, day vs night split, cost, usage calendar |
-| **Fuel**        | Fuel consumption     | CSV / JSON import           | L/100km economy, price/L trend, cost per month, total spend |
-| **Mobility**    | Scooter & rides      | CSV / JSON import           | Rides per provider, spend, distance, monthly trend |
+| **Movies & TV** | Everything you watch | Trakt (API)                 | Watched summary (last 30 days and all time, shows and movies with watch time), unique series and movies, plays per month, watch calendar, top genres and shows, ratings, watchlist, collection |
+| **Finance**     | Bank transfers       | Assistant screenshot import | Monthly cash flow, spend by category, balance trend, top merchants |
+| **Energy**      | Home electricity     | Tibber (API), assistant     | kWh per month, day vs night split, cost, usage calendar |
+| **Fuel**        | Fuel consumption     | Assistant screenshot import | L/100km economy, price/L trend, cost per month, total spend |
+| **Mobility**    | Scooter & rides      | Assistant screenshot import | Rides per provider, spend, distance, monthly trend |
 
 The **Trakt** connector performs a **full sync**: watch history (movies and episodes),
 ratings (movies, shows, seasons, episodes), watchlist, collection, and your profile stats.
-**Tibber** is a real, working energy connector. Everything is API-first; CSV / JSON import
-is always available as a fallback, and the roadmap adds more API sources (Letterboxd and
-Plex for watching, GoCardless for finance, Strava and ride apps for mobility).
+**Tibber** is a real, working energy connector. For providers without APIs or export files,
+upload screenshots in the assistant and ask it to import them. The backend dedupes repeated
+uploads automatically.
 
 ### Modules and connectors
 
@@ -106,8 +106,7 @@ The platform separates the **what** from the **where**:
 - A **module** is a domain. It defines the database tables, the widgets (statistics), and
   an accent color. It does not care where data comes from.
 - A **connector** is a data source attached to a module. It has its own config (API keys),
-  its own enable switch, an optional brand icon, and either a `sync` (for APIs) or an
-  `import` (for CSV / JSON).
+  its own enable switch, an optional brand icon, and usually a `sync` function for API pulls.
 
 So the Movies & TV module can pull from Trakt today and Letterboxd tomorrow, into the same
 stats.
@@ -118,8 +117,8 @@ stats.
   syncs automatically on a schedule (and right after you connect). You can still trigger one
   manually with `POST /api/modules/<id>/connectors/<connector>/sync`. Trakt connects with a
   one-time PIN instead of a raw token, see [Connecting Trakt](#connecting-trakt).
-- **CSV / JSON import**: `POST /api/modules/<id>/connectors/csv/import` with
-  `{ "rows": [ ... ] }`. Each module documents its row shape in the connector description.
+- **Assistant screenshot import**: upload screenshots in chat and ask the assistant to save
+  them. It extracts structured rows and writes deduped records to local tables.
 
 ### Connecting Trakt
 
@@ -158,14 +157,14 @@ and you only need to authorize and paste the PIN.
                        │    ├─ registry   enable·config·discover    │
                        │    ├─ scheduler  periodic connector sync   │
                        │    ├─ db         ClickHouse client + DDL    │
-                       │    ├─ ai         chat + read-only SQL tool  │
+                       │    ├─ ai         chat + SQL + local writes   │
                        │    └─ routes     REST API + /api/chat       │
                        │                                            │
                        │   modules/                                 │
                        │    ├─ watching ├─ finance  ├─ fuel         │
                        │    ├─ energy   └─ mobility                 │
                        │       module: migrations · widgets         │
-                       │       connectors: trakt · tibber · csv     │
+                       │       connectors: trakt · tibber            │
                        └───────────────────────┬────────────────────┘
                                                ▼
                                       ┌──────────────────┐
@@ -192,18 +191,17 @@ The module owns the schema and widgets; connectors bring the data in.
 ```ts
 import type { Connector, LifeStackModule } from "../../core/types";
 
-// A connector is a data source. APIs implement `sync`; imports implement `import`.
-const phoneExport: Connector = {
-  id: "csv",
-  name: "CSV import",
-  description: "Import a step export. Rows: {day, steps}.",
-  kind: "import",
-  async import(ctx, rows) {
-    const values = (rows as Record<string, unknown>[]).map((r) => ({
-      day: String(r.day).slice(0, 10),
-      steps: Number(r.steps ?? 0),
-    }));
-    await ctx.db.insert("steps_day", values);   // batch insert (JSONEachRow)
+// A connector is usually an API source with a sync() function.
+const wearableApi: Connector = {
+  id: "wearable",
+  name: "Wearable API",
+  description: "Sync daily steps from your wearable account.",
+  kind: "api",
+  syncIntervalMinutes: 360,
+  async sync(ctx) {
+    // fetch external data, normalize, then batch insert
+    const values = [{ day: "2026-06-17", steps: 10234 }];
+    await ctx.db.insert("steps_day", values); // batch insert (JSONEachRow)
     return { inserted: values.length };
   },
 };
@@ -222,7 +220,7 @@ const steps: LifeStackModule = {
      ) ENGINE = ReplacingMergeTree ORDER BY day`,
   ],
 
-  connectors: [phoneExport],                     // add an `api` connector with sync() later
+  connectors: [wearableApi],
 
   // Widgets are the dashboard. Each returns data for a typed chart.
   widgets: [

@@ -1,30 +1,6 @@
-import type { Connector, LifeStackModule } from "../../core/types";
+import type { LifeStackModule } from "../../core/types";
 
 const round2 = (n: number): number => Math.round(n * 100) / 100;
-
-const csv: Connector = {
-  id: "csv",
-  name: "CSV / JSON import",
-  description: "Import fill-ups. Rows: {day, liters, price_per_liter, odometer}.",
-  kind: "import",
-  async import(ctx, rows) {
-    const values = rows
-      .filter((r): r is Record<string, unknown> => typeof r === "object" && r !== null)
-      .map((r) => {
-        const liters = Number(r.liters ?? 0);
-        const ppl = Number(r.price_per_liter ?? r.pricePerLiter ?? 0);
-        return {
-          day: String(r.day ?? r.date ?? new Date().toISOString()).slice(0, 10),
-          liters,
-          price_per_liter: ppl,
-          cost: Number(r.cost ?? round2(liters * ppl)),
-          odometer: Number(r.odometer ?? 0),
-        };
-      });
-    await ctx.db.insert("fuel_fillup", values);
-    return { inserted: values.length };
-  },
-};
 
 const fuel: LifeStackModule = {
   id: "fuel",
@@ -41,7 +17,7 @@ const fuel: LifeStackModule = {
        odometer Int32
      ) ENGINE = ReplacingMergeTree ORDER BY odometer`,
   ],
-  connectors: [csv],
+  connectors: [],
   widgets: [
     {
       id: "avg-consumption",

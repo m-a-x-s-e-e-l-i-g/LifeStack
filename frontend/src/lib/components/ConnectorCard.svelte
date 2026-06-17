@@ -266,9 +266,6 @@
           <button class="btn btn--ghost" onclick={save} disabled={busy}>Save config</button>
         {/if}
       {/if}
-      {#if connector.hasImport}
-        <span class="importnote">CSV import via API</span>
-      {/if}
     </div>
     <div class="right">
       {#if status}<span class="status">{status}</span>{/if}
@@ -527,7 +524,6 @@
     align-items: center;
     gap: var(--s3);
   }
-  .importnote,
   .last {
     font-size: 11.5px;
     color: var(--text-faint);

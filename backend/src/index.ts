@@ -13,7 +13,7 @@ async function main(): Promise<void> {
   await runCoreMigrations();
   await initModules();
 
-  const app = Fastify({ logger: false, bodyLimit: 10 * 1024 * 1024 });
+  const app = Fastify({ logger: false, bodyLimit: 25 * 1024 * 1024 });
   await app.register(cors, { origin: true });
   await registerRoutes(app);
   startScheduler();

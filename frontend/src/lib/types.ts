@@ -152,6 +152,7 @@ export interface AiStatus {
 export interface ChatMessage {
   role: "user" | "assistant" | "system" | "tool";
   content: string;
+  attachments?: { name?: string | null; mime: string; dataUrl: string }[];
 }
 
 export interface ChatStep {

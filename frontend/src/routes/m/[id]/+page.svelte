@@ -71,7 +71,7 @@
   {#if !data.stats.enabled}
     <div class="disabled panel">
       <h2>This module is off</h2>
-      <p>Enable it, then connect a source or import a file to populate its stats.</p>
+      <p>Enable it, then connect a source or add records via the assistant to populate its stats.</p>
       <button class="btn btn--primary" onclick={enable} disabled={busy}>Enable {m.name}</button>
     </div>
   {:else if !widgets.length}

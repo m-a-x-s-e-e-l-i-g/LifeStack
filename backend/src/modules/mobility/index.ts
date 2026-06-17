@@ -1,25 +1,4 @@
-import type { Connector, LifeStackModule } from "../../core/types";
-
-const csv: Connector = {
-  id: "csv",
-  name: "CSV / JSON import",
-  description: "Import rides. Rows: {day, provider, type, distance_km, duration_min, cost}.",
-  kind: "import",
-  async import(ctx, rows) {
-    const values = rows
-      .filter((r): r is Record<string, unknown> => typeof r === "object" && r !== null)
-      .map((r) => ({
-        day: String(r.day ?? r.date ?? new Date().toISOString()).slice(0, 10),
-        provider: String(r.provider ?? "Unknown"),
-        type: String(r.type ?? "car"),
-        distance_km: Number(r.distance_km ?? r.distance ?? 0),
-        duration_min: Number(r.duration_min ?? r.duration ?? 0),
-        cost: Number(r.cost ?? 0),
-      }));
-    await ctx.db.insert("mobility_ride", values);
-    return { inserted: values.length };
-  },
-};
+import type { LifeStackModule } from "../../core/types";
 
 const mobility: LifeStackModule = {
   id: "mobility",
@@ -37,7 +16,7 @@ const mobility: LifeStackModule = {
        cost Float64
      ) ENGINE = MergeTree ORDER BY day`,
   ],
-  connectors: [csv],
+  connectors: [],
   widgets: [
     {
       id: "rides-month",
