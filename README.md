@@ -87,7 +87,7 @@ in through **connectors** (pluggable sources). Ships with five modules:
 
 | Module          | Domain              | Connectors                  | Sample statistics |
 |-----------------|---------------------|-----------------------------|-------------------|
-| **Movies & TV** | Everything you watch | Trakt (API)                 | Watched summary (last 30 days and all time), films and episodes watched, hours watched, plays per month, watch calendar, top genres and shows, ratings, watchlist, collection |
+| **Movies & TV** | Everything you watch | Trakt (API)                 | Watched summary (last 30 days and all time, shows and movies with watch time), unique titles, plays per month, watch calendar, top genres and shows, ratings, watchlist, collection |
 | **Finance**     | Bank transfers       | CSV / JSON import           | Monthly cash flow, spend by category, balance trend, top merchants |
 | **Energy**      | Home electricity     | Tibber (API), CSV import    | kWh per month, day vs night split, cost, usage calendar |
 | **Fuel**        | Fuel consumption     | CSV / JSON import           | L/100km economy, price/L trend, cost per month, total spend |

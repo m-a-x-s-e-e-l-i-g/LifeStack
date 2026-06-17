@@ -492,61 +492,6 @@ const watching: LifeStackModule = {
       },
     },
     {
-      id: "films-year",
-      title: "Films watched",
-      subtitle: "All time",
-      type: "metric",
-      size: "sm",
-      featured: true,
-      async query(ctx) {
-        const s = await ctx.db.query<{ v: number }>(
-          `SELECT toInt32(value) AS v FROM watch_stats FINAL WHERE metric = 'movies_watched' LIMIT 1`,
-        );
-        if (s[0]?.v) return { value: s[0].v, unit: "films" };
-        const rows = await ctx.db.query<{ v: number }>(
-          `SELECT toInt32(count()) AS v FROM watch_history FINAL WHERE kind = 'movie'`,
-        );
-        return { value: rows[0]?.v ?? 0, unit: "films" };
-      },
-    },
-    {
-      id: "episodes-year",
-      title: "Episodes watched",
-      subtitle: "All time",
-      type: "metric",
-      size: "sm",
-      featured: true,
-      async query(ctx) {
-        const s = await ctx.db.query<{ v: number }>(
-          `SELECT toInt32(value) AS v FROM watch_stats FINAL WHERE metric = 'episodes_watched' LIMIT 1`,
-        );
-        if (s[0]?.v) return { value: s[0].v, unit: "episodes" };
-        const rows = await ctx.db.query<{ v: number }>(
-          `SELECT toInt32(count()) AS v FROM watch_history FINAL WHERE kind = 'episode'`,
-        );
-        return { value: rows[0]?.v ?? 0, unit: "episodes" };
-      },
-    },
-    {
-      id: "hours",
-      title: "Hours watched",
-      subtitle: "All time",
-      type: "metric",
-      size: "sm",
-      featured: true,
-      async query(ctx) {
-        const s = await ctx.db.query<{ v: number }>(
-          `SELECT toInt32(round(sum(value) / 60)) AS v FROM watch_stats FINAL
-           WHERE metric IN ('movies_minutes','episodes_minutes')`,
-        );
-        if (s[0]?.v) return { value: s[0].v, unit: "h" };
-        const rows = await ctx.db.query<{ v: number }>(
-          `SELECT toInt32(round(sum(runtime) / 60)) AS v FROM watch_history FINAL`,
-        );
-        return { value: rows[0]?.v ?? 0, unit: "h" };
-      },
-    },
-    {
       id: "unique",
       title: "Unique titles",
       subtitle: "All time",
