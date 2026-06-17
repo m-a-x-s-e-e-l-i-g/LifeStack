@@ -559,6 +559,8 @@ const TOOLS = [
   },
 ];
 
+const MAX_ATTACHMENTS_PER_BATCH = 5;
+
 function systemPrompt(schema: string): string {
   const today = new Date().toISOString().slice(0, 10);
   return `You are the analyst inside LifeStack, a self-hosted personal statistics app. You can answer questions and, when the user asks to import data, save structured records.
@@ -594,6 +596,49 @@ function asText(content: unknown): string {
   return parts.join("\n").trim();
 }
 
+function summarizeSteps(steps: ChatStep[]): {
+  inserted: number;
+  skippedDuplicates: number;
+  rejected: number;
+} {
+  let inserted = 0;
+  let skippedDuplicates = 0;
+  let rejected = 0;
+  for (const step of steps) {
+    const row = step.rows?.[0];
+    if (!row || typeof row !== "object") continue;
+    const r = row as Record<string, unknown>;
+    inserted += Number(r.inserted ?? 0);
+    skippedDuplicates += Number(r.skippedDuplicates ?? 0);
+    rejected += Number(r.rejected ?? 0);
+  }
+  return { inserted, skippedDuplicates, rejected };
+}
+
+function isBatchableImageError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return /image_parse_error|unsupported image|payload too large|request too large|token limit|context length|too many images|bad gateway|internal server error|500/i.test(
+    message,
+  );
+}
+
+function chunk<T>(items: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+  return out;
+}
+
+function findAttachmentUserIndex(messages: ChatMessage[]): number {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === "user" && (messages[i].attachments?.length ?? 0) > 0) return i;
+  }
+  return -1;
+}
+
+function withAttachments(messages: ChatMessage[], index: number, attachments: ChatAttachment[]): ChatMessage[] {
+  return messages.map((m, i) => (i === index ? { ...m, attachments } : m));
+}
+
 function toUserContent(m: ChatMessage): unknown {
   const images = (m.attachments ?? []).filter(
     (a) => typeof a.dataUrl === "string" && /^data:image\//.test(a.dataUrl),
@@ -621,134 +666,223 @@ export async function chat(
     };
   }
 
-  const schema = await schemaSummary();
-  const convo: unknown[] = [
-    { role: "system", content: systemPrompt(schema) },
-    ...incoming
-      .filter((m) => m.role === "user" || m.role === "assistant")
-      .map((m) => ({
-        role: m.role,
-        content: m.role === "user" ? toUserContent(m) : (m.content ?? ""),
-      })),
-  ];
+  async function runConversation(
+    messages: ChatMessage[],
+    allowSplitOnImageError = false,
+  ): Promise<{ reply: string; steps: ChatStep[] }> {
+    const schema = await schemaSummary();
+    const convo: unknown[] = [
+      { role: "system", content: systemPrompt(schema) },
+      ...messages
+        .filter((m) => m.role === "user" || m.role === "assistant")
+        .map((m) => ({
+          role: m.role,
+          content: m.role === "user" ? toUserContent(m) : (m.content ?? ""),
+        })),
+    ];
 
-  const steps: ChatStep[] = [];
-  const hasImages = incoming.some(
-    (m) => m.role === "user" && Array.isArray(m.attachments) && m.attachments.length > 0,
-  );
-  const modelCandidates = (
-    hasImages && /api\.openai\.com/i.test(cfg.baseUrl)
-      ? [cfg.model, "gpt-4.1-mini", "gpt-4o-mini"]
-      : [cfg.model]
-  ).filter((m, i, all) => !!m && all.indexOf(m) === i);
+    const steps: ChatStep[] = [];
+    const hasImages = messages.some(
+      (m) => m.role === "user" && Array.isArray(m.attachments) && m.attachments.length > 0,
+    );
+    const modelCandidates = (
+      hasImages && /api\.openai\.com/i.test(cfg.baseUrl)
+        ? [cfg.model, "gpt-4.1-mini", "gpt-4o-mini"]
+        : [cfg.model]
+    ).filter((m, i, all) => !!m && all.indexOf(m) === i);
 
-  const callModelWithFallback = async (): Promise<ModelMessage> => {
-    let lastError: Error | null = null;
-    for (const model of modelCandidates) {
-      try {
-        return await callModel(cfg, model, convo, TOOLS);
-      } catch (err) {
-        lastError = err instanceof Error ? err : new Error(String(err));
-        const msg = lastError.message.toLowerCase();
-        const maybeImageIssue =
-          msg.includes("image_parse_error") ||
-          msg.includes("unsupported image") ||
-          msg.includes("does not support image");
-        if (!maybeImageIssue) throw lastError;
-      }
-    }
-    throw lastError ?? new Error("LLM request failed");
-  };
-
-  for (let i = 0; i < 8; i++) {
-    let msg: ModelMessage;
-    try {
-      msg = await callModelWithFallback();
-    } catch (err) {
-      const text = err instanceof Error ? err.message : String(err);
-      if (hasImages && /image_parse_error|unsupported image|does not support image/i.test(text)) {
-        return {
-          configured: true,
-          steps,
-          reply:
-            "Your current model endpoint rejected the screenshot. Switch to a vision-capable OpenAI-compatible model in Settings, then upload again.",
-        };
-      }
-      throw err;
-    }
-    convo.push(msg);
-    const calls = msg.tool_calls ?? [];
-    if (calls.length === 0) {
-      return { reply: asText(msg.content), steps, configured: true };
-    }
-    for (const call of calls) {
-      let content: string;
-      let stepSql = "";
-      let stepRows: Record<string, unknown>[] | null = null;
-      let stepError: string | null = null;
-      try {
-        const args = JSON.parse(call.function.arguments || "{}") as {
-          sql?: string;
-          target?: WriteTarget;
-          rows?: unknown[];
-          where?: unknown;
-        };
-        if (call.function.name === "run_sql") {
-          stepSql = String(args.sql ?? "");
-          const out = await runReadonlySql(stepSql);
-          stepRows = out.rows;
-          content = JSON.stringify({ rowCount: out.rows.length, rows: out.rows.slice(0, 50) });
-        } else if (call.function.name === "write_records") {
-          const target = String(args.target ?? "") as WriteTarget;
-          if (
-            ![
-              "mobility_ride",
-              "finance_tx",
-              "fuel_fillup",
-              "energy_reading",
-              "food_order",
-            ].includes(target)
-          ) {
-            throw new Error("Unsupported write target");
-          }
-          const result = await writeRecords(target, Array.isArray(args.rows) ? args.rows : []);
-          stepSql = `write_records(${target})`;
-          stepRows = [result];
-          content = JSON.stringify(result);
-        } else if (call.function.name === "delete_records") {
-          const target = String(args.target ?? "") as WriteTarget;
-          if (
-            ![
-              "mobility_ride",
-              "finance_tx",
-              "fuel_fillup",
-              "energy_reading",
-              "food_order",
-            ].includes(target)
-          ) {
-            throw new Error("Unsupported delete target");
-          }
-          const result = await deleteRecords(target, args.where);
-          stepSql = `delete_records(${target})`;
-          stepRows = [result];
-          content = JSON.stringify(result);
-        } else {
-          throw new Error(`Unsupported tool: ${call.function.name}`);
+    const callModelWithFallback = async (): Promise<ModelMessage> => {
+      let lastError: Error | null = null;
+      for (const model of modelCandidates) {
+        try {
+          return await callModel(cfg, model, convo, TOOLS);
+        } catch (err) {
+          lastError = err instanceof Error ? err : new Error(String(err));
+          const msg = lastError.message.toLowerCase();
+          const maybeImageIssue =
+            msg.includes("image_parse_error") ||
+            msg.includes("unsupported image") ||
+            msg.includes("does not support image");
+          if (!maybeImageIssue) throw lastError;
         }
-      } catch (err) {
-        stepError = err instanceof Error ? err.message : String(err);
-        content = JSON.stringify({ error: stepError });
       }
-      steps.push({ sql: stepSql, rows: stepRows, error: stepError });
-      convo.push({ role: "tool", tool_call_id: call.id, content });
+      throw lastError ?? new Error("LLM request failed");
+    };
+
+    for (let i = 0; i < 8; i++) {
+      let msg: ModelMessage;
+      try {
+        msg = await callModelWithFallback();
+      } catch (err) {
+        const text = err instanceof Error ? err.message : String(err);
+        if (
+          hasImages &&
+          /image_parse_error|unsupported image|does not support image/i.test(text) &&
+          !(allowSplitOnImageError && attachmentCount > 1)
+        ) {
+          return {
+            reply:
+              "Your current model endpoint rejected the screenshot. Switch to a vision-capable OpenAI-compatible model in Settings, then upload again.",
+            steps,
+          };
+        }
+        throw err;
+      }
+      convo.push(msg);
+      const calls = msg.tool_calls ?? [];
+      if (calls.length === 0) {
+        return { reply: asText(msg.content), steps };
+      }
+      for (const call of calls) {
+        let content: string;
+        let stepSql = "";
+        let stepRows: Record<string, unknown>[] | null = null;
+        let stepError: string | null = null;
+        try {
+          const args = JSON.parse(call.function.arguments || "{}") as {
+            sql?: string;
+            target?: WriteTarget;
+            rows?: unknown[];
+            where?: unknown;
+          };
+          if (call.function.name === "run_sql") {
+            stepSql = String(args.sql ?? "");
+            const out = await runReadonlySql(stepSql);
+            stepRows = out.rows;
+            content = JSON.stringify({ rowCount: out.rows.length, rows: out.rows.slice(0, 50) });
+          } else if (call.function.name === "write_records") {
+            const target = String(args.target ?? "") as WriteTarget;
+            if (
+              ![
+                "mobility_ride",
+                "finance_tx",
+                "fuel_fillup",
+                "energy_reading",
+                "food_order",
+              ].includes(target)
+            ) {
+              throw new Error("Unsupported write target");
+            }
+            const result = await writeRecords(target, Array.isArray(args.rows) ? args.rows : []);
+            stepSql = `write_records(${target})`;
+            stepRows = [result];
+            content = JSON.stringify(result);
+          } else if (call.function.name === "delete_records") {
+            const target = String(args.target ?? "") as WriteTarget;
+            if (
+              ![
+                "mobility_ride",
+                "finance_tx",
+                "fuel_fillup",
+                "energy_reading",
+                "food_order",
+              ].includes(target)
+            ) {
+              throw new Error("Unsupported delete target");
+            }
+            const result = await deleteRecords(target, args.where);
+            stepSql = `delete_records(${target})`;
+            stepRows = [result];
+            content = JSON.stringify(result);
+          } else {
+            throw new Error(`Unsupported tool: ${call.function.name}`);
+          }
+        } catch (err) {
+          stepError = err instanceof Error ? err.message : String(err);
+          content = JSON.stringify({ error: stepError });
+        }
+        steps.push({ sql: stepSql, rows: stepRows, error: stepError });
+        convo.push({ role: "tool", tool_call_id: call.id, content });
+      }
+    }
+
+    log.warn("chat hit tool-call limit without a final answer");
+    return {
+      reply:
+        "I ran several queries/actions but could not settle on an answer. Try asking something more specific.",
+      steps,
+    };
+  }
+
+  const attachmentIndex = findAttachmentUserIndex(incoming);
+  const attachmentCount = attachmentIndex >= 0 ? incoming[attachmentIndex].attachments?.length ?? 0 : 0;
+
+  if (attachmentIndex < 0 || attachmentCount <= MAX_ATTACHMENTS_PER_BATCH) {
+    const result = await runConversation(incoming);
+    return { configured: true, ...result };
+  }
+
+  const attachments = incoming[attachmentIndex].attachments ?? [];
+  const batches = chunk(attachments, MAX_ATTACHMENTS_PER_BATCH);
+  interface BatchResult {
+    steps: ChatStep[];
+    inserted: number;
+    skippedDuplicates: number;
+    rejected: number;
+    failedBatches: number;
+  }
+
+  async function processBatch(batchAttachments: ChatAttachment[]): Promise<BatchResult> {
+    try {
+      const result = await runConversation(
+        withAttachments(incoming, attachmentIndex, batchAttachments),
+        true,
+      );
+      const summary = summarizeSteps(result.steps);
+      return {
+        steps: result.steps,
+        inserted: summary.inserted,
+        skippedDuplicates: summary.skippedDuplicates,
+        rejected: summary.rejected,
+        failedBatches: 0,
+      };
+    } catch (err) {
+      if (batchAttachments.length > 1 && isBatchableImageError(err)) {
+        const splitPoint = Math.ceil(batchAttachments.length / 2);
+        const left = await processBatch(batchAttachments.slice(0, splitPoint));
+        const right = await processBatch(batchAttachments.slice(splitPoint));
+        return {
+          steps: [...left.steps, ...right.steps],
+          inserted: left.inserted + right.inserted,
+          skippedDuplicates: left.skippedDuplicates + right.skippedDuplicates,
+          rejected: left.rejected + right.rejected,
+          failedBatches: left.failedBatches + right.failedBatches,
+        };
+      }
+      const message = err instanceof Error ? err.message : String(err);
+      return {
+        steps: [{ sql: "batch", rows: null, error: message }],
+        inserted: 0,
+        skippedDuplicates: 0,
+        rejected: 0,
+        failedBatches: 1,
+      };
     }
   }
 
-  log.warn("chat hit tool-call limit without a final answer");
-  return {
-    configured: true,
-    steps,
-    reply:
-      "I ran several queries/actions but could not settle on an answer. Try asking something more specific.",
-  };
+  const results: BatchResult[] = [];
+  let next = 0;
+  const workers = Array.from({ length: Math.min(3, batches.length) }, async () => {
+    while (true) {
+      const idx = next++;
+      if (idx >= batches.length) return;
+      results[idx] = await processBatch(batches[idx]);
+    }
+  });
+  await Promise.all(workers);
+
+  const allSteps = results.flatMap((r) => r.steps);
+  const totalInserted = results.reduce((n, r) => n + r.inserted, 0);
+  const totalSkipped = results.reduce((n, r) => n + r.skippedDuplicates, 0);
+  const totalRejected = results.reduce((n, r) => n + r.rejected, 0);
+  const failedBatches = results.reduce((n, r) => n + r.failedBatches, 0);
+
+  const reply =
+    `Processed ${attachments.length} screenshots in ${batches.length} batch${batches.length === 1 ? "" : "es"}. ` +
+    `Saved ${totalInserted} row${totalInserted === 1 ? "" : "s"}, skipped ${totalSkipped} duplicate${totalSkipped === 1 ? "" : "s"}` +
+    (totalRejected > 0 ? `, rejected ${totalRejected}` : "") +
+    (failedBatches > 0 ? `, ${failedBatches} batch${failedBatches === 1 ? "" : "es"} failed` : "") +
+    `.`;
+
+  return { configured: true, steps: allSteps, reply };
 }
