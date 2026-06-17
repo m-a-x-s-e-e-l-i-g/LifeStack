@@ -107,6 +107,23 @@ const mobility: LifeStackModule = {
       },
     },
     {
+      id: "km-by-type",
+      title: "km per type",
+      type: "donut",
+      size: "md",
+      featured: true,
+      async query(ctx) {
+        const rows = await ctx.db.query(
+          `SELECT ${rideTypeLabelExpr} AS label, round(sum(distance_km), 1) AS value
+           FROM mobility_ride
+           WHERE distance_km > 0
+           GROUP BY label
+           ORDER BY value DESC`,
+        );
+        return { slices: rows, unit: "km" };
+      },
+    },
+    {
       id: "spend-month",
       title: "Spend per month",
       type: "bar",
