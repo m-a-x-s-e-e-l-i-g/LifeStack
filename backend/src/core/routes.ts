@@ -11,6 +11,7 @@ import {
   lastSync,
   runConnectorImport,
   runConnectorSync,
+  runConnectorAuthorize,
   setConnectorConfig,
   setConnectorEnabled,
   setModuleEnabled,
@@ -188,6 +189,23 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       }
     },
   );
+
+  app.post<{
+    Params: { id: string; cid: string };
+    Body: Record<string, unknown>;
+  }>("/api/modules/:id/connectors/:cid/authorize", async (req, reply) => {
+    const r = await resolve(req.params.id, req.params.cid, reply);
+    if (!r) return;
+    if (!r.c.authorize) return reply.code(400).send({ error: "connector has no authorize" });
+    try {
+      const result = await runConnectorAuthorize(r.m, r.c, req.body ?? {});
+      return { ok: true, ...result, connector: await connectorView(r.m, r.c) };
+    } catch (err) {
+      return reply
+        .code(502)
+        .send({ ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+  });
 
   app.post<{
     Params: { id: string; cid: string };

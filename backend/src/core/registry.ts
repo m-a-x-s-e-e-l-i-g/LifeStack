@@ -69,9 +69,9 @@ export async function isConnectorEnabled(
   return (await connectorState(moduleId, connectorId)).enabled;
 }
 
-/** True when every env-backed field of an api connector has its env var set. */
+/** True when every required env-backed field of an api connector has its env var set. */
 function envSatisfied(c: Connector): boolean {
-  const envFields = (c.configSchema ?? []).filter((f) => f.env);
+  const envFields = (c.configSchema ?? []).filter((f) => f.env && !f.optional);
   return envFields.length > 0 && envFields.every((f) => !!process.env[f.env!]);
 }
 
@@ -247,6 +247,17 @@ export async function runConnectorSync(
     logger.child(`${m.id}:${c.id}`).error(`sync failed: ${message}`);
     throw err;
   }
+}
+
+/** Run a connector's explicit authorize step (e.g. OAuth PIN exchange). */
+export async function runConnectorAuthorize(
+  m: LifeStackModule,
+  c: Connector,
+  input: Record<string, unknown>,
+): Promise<SyncResult> {
+  if (!c.authorize) return { message: "connector has no authorize" };
+  const ctx = await buildConnectorContext(m, c);
+  return c.authorize(ctx, input);
 }
 
 /** Run a connector's import handler, recording a sync_log entry. */

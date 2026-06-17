@@ -78,6 +78,49 @@
       await action(`/modules/${moduleId}/connectors/${connector.id}/config`, "PUT", { config });
       status = "Saved";
     }, "Saving…");
+
+  // --- Trakt staged connect flow -------------------------------------------
+  const cfgField = (key: string) => connector.config.find((f) => f.key === key);
+  const connected = $derived(!!cfgField("accessToken")?.hasValue);
+  const credsReady = $derived(
+    !!cfgField("clientId")?.hasValue && !!cfgField("clientSecret")?.hasValue,
+  );
+  const secretSet = $derived(!!cfgField("clientSecret")?.hasValue);
+
+  let pin = $state("");
+  let editCreds = $state(false);
+  let reauth = $state(false);
+
+  const saveCreds = () =>
+    run(async () => {
+      const config: Record<string, unknown> = {};
+      if (typeof values.clientId === "string") config.clientId = values.clientId;
+      if (typeof values.clientSecret === "string" && values.clientSecret !== "")
+        config.clientSecret = values.clientSecret;
+      await action(`/modules/${moduleId}/connectors/${connector.id}/config`, "PUT", { config });
+      editCreds = false;
+      status = "Saved";
+    }, "Saving…");
+
+  const connect = () =>
+    run(async () => {
+      await action(`/modules/${moduleId}/connectors/${connector.id}/authorize`, "POST", { pin });
+      if (!connector.enabled)
+        await action(`/modules/${moduleId}/connectors/${connector.id}/enable`);
+      pin = "";
+      reauth = false;
+      status = "Connected";
+    }, "Connecting…");
+
+  const disconnect = () =>
+    run(async () => {
+      await action(`/modules/${moduleId}/connectors/${connector.id}/authorize`, "POST", {
+        disconnect: true,
+      });
+      if (connector.enabled)
+        await action(`/modules/${moduleId}/connectors/${connector.id}/disable`);
+      status = "Disconnected";
+    }, "Disconnecting…");
 </script>
 
 <div class="conn" class:on={connector.enabled} style="--accent: {accent}">
@@ -102,7 +145,107 @@
     </button>
   </div>
 
-  {#if connector.config.length}
+  {#if connector.id === "trakt"}
+    <div class="tk">
+      {#snippet authLink()}
+        {#if traktAuthorizeUrl}
+          <a class="authlink" href={traktAuthorizeUrl} target="_blank" rel="noopener noreferrer">
+            Authorize on Trakt
+            <span class="go" aria-hidden="true">&rarr;</span>
+          </a>
+        {/if}
+      {/snippet}
+      {#snippet pinRow()}
+        <div class="tk-pin">
+          <input
+            class="tk-pininput"
+            placeholder="Paste PIN here"
+            bind:value={pin}
+            autocomplete="off"
+            spellcheck="false"
+          />
+          <button class="btn" onclick={connect} disabled={busy || !pin.trim()}>Connect</button>
+        </div>
+      {/snippet}
+
+      {#if connected && !editCreds}
+        <div class="tk-state">
+          <span class="tk-dot" aria-hidden="true"></span>
+          <span class="tk-statetext">Connected to Trakt</span>
+        </div>
+        {#if reauth}
+          <p class="tk-hint">
+            Authorize again on Trakt and paste a fresh PIN. The new token replaces the current one,
+            even if you set one through the environment.
+          </p>
+          <div class="tk-authrow">
+            {@render authLink()}
+            <button class="linklike" type="button" onclick={() => { reauth = false; pin = ""; }}>
+              Cancel
+            </button>
+          </div>
+          {@render pinRow()}
+        {:else}
+          <p class="tk-hint">
+            Your account is linked. Sync to pull watch history, ratings, watchlist, collection and
+            stats.
+          </p>
+          <div class="tk-actions">
+            <button class="btn" onclick={sync} disabled={busy || !connector.enabled}>Sync now</button>
+            <button class="btn btn--ghost" onclick={() => (reauth = true)} disabled={busy}>
+              Reconnect
+            </button>
+            <button class="btn btn--ghost" onclick={() => (editCreds = true)} disabled={busy}>
+              App credentials
+            </button>
+            <button class="btn btn--ghost tk-danger" onclick={disconnect} disabled={busy}>
+              Disconnect
+            </button>
+          </div>
+        {/if}
+      {:else if credsReady && !editCreds}
+        <p class="tk-hint">Authorize LifeStack on Trakt, then paste the PIN it shows you.</p>
+        <div class="tk-authrow">
+          {@render authLink()}
+          <button class="linklike" type="button" onclick={() => (editCreds = true)}>
+            Edit credentials
+          </button>
+        </div>
+        {@render pinRow()}
+      {:else}
+        <p class="tk-hint">
+          Create an app at
+          <a href="https://trakt.tv/oauth/applications" target="_blank" rel="noopener noreferrer">
+            trakt.tv/oauth/applications
+          </a>, set its Redirect URI to <code>urn:ietf:wg:oauth:2.0:oob</code>, then paste its Client
+          ID and Secret.
+        </p>
+        <div class="fields">
+          <label class="field">
+            <span class="flabel">Client ID</span>
+            <input type="text" bind:value={values.clientId} autocomplete="off" spellcheck="false" />
+          </label>
+          <label class="field">
+            <span class="flabel">Client secret</span>
+            <input
+              type="password"
+              placeholder={secretSet ? "•••••••• (set)" : "not set"}
+              bind:value={values.clientSecret}
+              autocomplete="off"
+            />
+          </label>
+        </div>
+        <div class="tk-actions">
+          <button class="btn" onclick={saveCreds} disabled={busy}>Save credentials</button>
+          {#if connected || credsReady}
+            <button class="btn btn--ghost" onclick={() => (editCreds = false)} disabled={busy}>
+              Cancel
+            </button>
+          {/if}
+        </div>
+      {/if}
+    </div>
+  {:else if connector.config.length}
     <div class="fields">
       {#each connector.config as f (f.key)}
         <label class="field">
@@ -125,27 +268,15 @@
     </div>
   {/if}
 
-  {#if connector.id === "trakt"}
-    <p class="auth">
-      {#if traktAuthorizeUrl}
-        <a href={traktAuthorizeUrl} target="_blank" rel="noopener noreferrer" class="authlink">
-          Authorize on Trakt
-          <span class="go" aria-hidden="true">&rarr;</span>
-        </a>
-        <span class="authnote">Approve access, then paste the PIN below and save.</span>
-      {:else}
-        <span class="authnote">Enter your Client ID to reveal the authorize link.</span>
-      {/if}
-    </p>
-  {/if}
-
   <div class="row">
     <div class="left">
-      {#if connector.config.length}
-        <button class="btn btn--ghost" onclick={save} disabled={busy}>Save config</button>
-      {/if}
-      {#if connector.hasSync}
-        <button class="btn" onclick={sync} disabled={busy || !connector.enabled}>Sync</button>
+      {#if connector.id !== "trakt"}
+        {#if connector.config.length}
+          <button class="btn btn--ghost" onclick={save} disabled={busy}>Save config</button>
+        {/if}
+        {#if connector.hasSync}
+          <button class="btn" onclick={sync} disabled={busy || !connector.enabled}>Sync</button>
+        {/if}
       {/if}
       {#if connector.hasImport}
         <span class="importnote">CSV import via API</span>
@@ -278,12 +409,92 @@
     color: var(--text-faint);
   }
 
-  .auth {
+  .tk {
+    display: flex;
+    flex-direction: column;
+    gap: var(--s3);
+  }
+  .tk-state {
+    display: flex;
+    align-items: center;
+    gap: var(--s2);
+  }
+  .tk-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 0 3px color-mix(in oklab, var(--accent) 22%, transparent);
+  }
+  .tk-statetext {
+    font-weight: 600;
+    font-size: 13.5px;
+  }
+  .tk-hint {
     margin: 0;
+    font-size: 12.5px;
+    color: var(--text-faint);
+    max-width: 64ch;
+    line-height: 1.5;
+  }
+  .tk-hint a {
+    color: var(--accent);
+  }
+  .tk-hint code {
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    padding: 1px 5px;
+    border-radius: 5px;
+    background: var(--surface-2);
+    color: var(--text-dim);
+  }
+  .tk-authrow,
+  .tk-actions {
     display: flex;
     flex-wrap: wrap;
-    align-items: baseline;
-    gap: var(--s2) var(--s3);
+    align-items: center;
+    gap: var(--s3);
+  }
+  .tk-pin {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--s2);
+  }
+  .tk-pininput {
+    flex: 1 1 180px;
+    min-width: 0;
+    background: var(--surface);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--r-sm);
+    padding: 8px 10px;
+    color: var(--text);
+    font: inherit;
+    font-size: 13.5px;
+    letter-spacing: 0.06em;
+  }
+  .tk-pininput:focus-visible {
+    border-color: var(--accent);
+    outline: none;
+  }
+  .linklike {
+    background: none;
+    border: none;
+    padding: 0;
+    font: inherit;
+    font-size: 12px;
+    color: var(--text-dim);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+    cursor: pointer;
+  }
+  .linklike:hover {
+    color: var(--text);
+  }
+  .tk-danger {
+    color: oklch(0.7 0.13 25);
+  }
+  .tk-danger:hover {
+    border-color: color-mix(in oklab, oklch(0.7 0.13 25) 45%, var(--border-strong));
   }
   .authlink {
     display: inline-flex;
@@ -309,10 +520,6 @@
   }
   .authlink:hover .go {
     transform: translateX(3px);
-  }
-  .authnote {
-    font-size: 11.5px;
-    color: var(--text-faint);
   }
 
   .row {

@@ -131,15 +131,14 @@ Trakt authorizes with a PIN, so there is no callback server to run.
    website. Leave the rest blank and save.
 3. Open the app and copy its **Client ID** and **Client Secret**.
 4. In LifeStack **Settings**, find the Movies & TV > Trakt connector. Paste the Client ID
-   and Client Secret, then click **Save config**.
-5. Click **Authorize on Trakt** (the link appears once a Client ID is set), approve access,
-   and copy the **PIN** Trakt gives you.
-6. Paste the PIN into the connector, **Save config**, then **Sync**.
+   and Client Secret, then click **Save credentials**.
+5. Click **Authorize on Trakt**, approve access, and copy the **PIN** Trakt gives you.
+6. Paste the PIN and click **Connect**. Once connected, click **Sync now** to pull your data.
 
-On that first sync the PIN is exchanged for an access token (plus a refresh token) and then
-cleared, so it never lingers in config. LifeStack refreshes the token automatically after
-that, so this is a one-time step. Prefer environment variables? Put `TRAKT_CLIENT_ID` and
-`TRAKT_CLIENT_SECRET` in `.env` and you only need to paste the PIN.
+The PIN is exchanged immediately for an access token (plus a refresh token); the PIN itself is
+never stored. LifeStack refreshes the token automatically afterward, so connecting is a one-time
+step. Prefer environment variables? Put `TRAKT_CLIENT_ID` and `TRAKT_CLIENT_SECRET` in `.env`,
+and you only need to authorize and paste the PIN.
 
 ## Architecture
 

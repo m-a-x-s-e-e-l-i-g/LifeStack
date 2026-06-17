@@ -65,6 +65,8 @@ export interface ConfigField {
   help?: string;
   /** Treat as secret: never return the value over the API, only whether it is set. */
   secret?: boolean;
+  /** Not required for the connector to count as configured (e.g. auto-enable from env). */
+  optional?: boolean;
   /** Environment variable used as a fallback default. */
   env?: string;
 }
@@ -89,6 +91,8 @@ export interface Connector {
   configSchema?: ConfigField[];
   syncIntervalMinutes?: number;
   sync?: (ctx: ConnectorContext) => Promise<SyncResult>;
+  /** Optional explicit auth step (e.g. OAuth PIN exchange) separate from data sync. */
+  authorize?: (ctx: ConnectorContext, input: Record<string, unknown>) => Promise<SyncResult>;
   import?: (ctx: ConnectorContext, rows: unknown[]) => Promise<SyncResult>;
 }
 

@@ -11,6 +11,12 @@ const TRAKT = "https://api.trakt.tv";
  */
 const TRAKT_REDIRECT = "urn:ietf:wg:oauth:2.0:oob";
 
+/**
+ * Trakt sits behind Cloudflare, which returns 403 to requests that lack a real
+ * User-Agent. Always send one, on both the API and OAuth token endpoints.
+ */
+const TRAKT_UA = "LifeStack/1.0 (+https://github.com/m-a-x-s-e-e-l-i-g/LifeStack)";
+
 interface TraktIds {
   trakt?: number;
 }
@@ -57,6 +63,7 @@ async function chunkedInsert(
 function traktHeaders(clientId: string, token: string): Record<string, string> {
   return {
     "Content-Type": "application/json",
+    "User-Agent": TRAKT_UA,
     "trakt-api-version": "2",
     "trakt-api-key": clientId,
     Authorization: `Bearer ${token}`,
@@ -85,10 +92,19 @@ async function traktToken(
 ): Promise<TraktToken> {
   const res = await fetch(`${TRAKT}/oauth/token`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", "User-Agent": TRAKT_UA },
     body: JSON.stringify({ ...body, redirect_uri: TRAKT_REDIRECT }),
   });
-  if (!res.ok) throw new Error(`${failure} (HTTP ${res.status}).`);
+  if (!res.ok) {
+    let detail = "";
+    try {
+      const data = (await res.json()) as { error?: string; error_description?: string };
+      detail = data.error_description || data.error || "";
+    } catch {
+      // non-JSON error body (e.g. an HTML gateway page); status alone will do
+    }
+    throw new Error(`${failure}${detail ? `: ${detail}` : ""} (HTTP ${res.status}).`);
+  }
   const tok = (await res.json()) as TraktToken;
   if (!tok.access_token) throw new Error(`${failure}: no access token returned.`);
   return tok;
@@ -149,28 +165,45 @@ const trakt: Connector = {
       label: "Client secret",
       type: "password",
       secret: true,
+      optional: true,
       env: "TRAKT_CLIENT_SECRET",
       help: "From the same Trakt app. Used once to exchange your PIN for a token.",
     },
     {
-      key: "pin",
-      label: "Authorization PIN",
-      type: "text",
-      help: "Use the authorize link above to approve access, then paste the PIN here, save, and sync. It is exchanged for a token and cleared.",
-    },
-    {
       key: "accessToken",
-      label: "Access token (set automatically)",
+      label: "Access token",
       type: "password",
       secret: true,
       env: "TRAKT_ACCESS_TOKEN",
-      help: "Filled in for you after the PIN exchange. Set manually only if you already have a token.",
+      help: "Set automatically once you connect. Provide one manually only if you already minted a token yourself.",
     },
   ],
+  // Exchange a one-time PIN for tokens (or clear them). Kept separate from sync so
+  // connecting is an explicit, fast step with its own success and error feedback.
+  async authorize(ctx, input) {
+    const clientId = String(ctx.config.clientId ?? "").trim();
+    const clientSecret = String(ctx.config.clientSecret ?? "").trim();
+
+    if (input.disconnect) {
+      await ctx.saveConfig({ accessToken: "", refreshToken: "" });
+      return { message: "Disconnected from Trakt." };
+    }
+
+    const pin = String(input.pin ?? "").trim();
+    if (!clientId || !clientSecret)
+      throw new Error("Add your Trakt Client ID and Client Secret, then save, before connecting.");
+    if (!pin) throw new Error("Paste the PIN Trakt gave you to connect.");
+
+    const tok = await traktExchangePin(clientId, clientSecret, pin);
+    await ctx.saveConfig({
+      accessToken: tok.access_token,
+      refreshToken: tok.refresh_token ?? "",
+    });
+    return { message: "Connected to Trakt." };
+  },
   async sync(ctx) {
     const clientId = String(ctx.config.clientId ?? "").trim();
     const clientSecret = String(ctx.config.clientSecret ?? "").trim();
-    const pin = String(ctx.config.pin ?? "").trim();
     let token = String(ctx.config.accessToken ?? "").trim();
     let refreshToken = String(ctx.config.refreshToken ?? "").trim();
 
@@ -178,21 +211,8 @@ const trakt: Connector = {
       throw new Error(
         "Add your Trakt Client ID. Create an app at https://trakt.tv/oauth/applications with redirect URI urn:ietf:wg:oauth:2.0:oob.",
       );
-
-    // A freshly pasted PIN wins: exchange it for a token, store it, clear the PIN.
-    if (pin) {
-      if (!clientSecret)
-        throw new Error("Add your Trakt Client Secret so the PIN can be exchanged for a token.");
-      const tok = await traktExchangePin(clientId, clientSecret, pin);
-      token = tok.access_token;
-      refreshToken = tok.refresh_token ?? "";
-      await ctx.saveConfig({ accessToken: token, refreshToken, pin: "" });
-    }
-
     if (!token)
-      throw new Error(
-        "Connect Trakt: open the authorize link, paste the PIN into the connector, save, then sync.",
-      );
+      throw new Error("Connect Trakt first: add your app credentials, authorize, and paste the PIN.");
 
     let headers = traktHeaders(clientId, token);
 
@@ -200,7 +220,7 @@ const trakt: Connector = {
     const probe = await fetch(`${TRAKT}/users/settings`, { headers });
     if (probe.status === 401) {
       if (!refreshToken || !clientSecret)
-        throw new Error("Trakt session expired. Paste a fresh PIN to reconnect.");
+        throw new Error("Trakt session expired. Reconnect with a fresh PIN.");
       const tok = await traktRefresh(clientId, clientSecret, refreshToken);
       token = tok.access_token;
       refreshToken = tok.refresh_token ?? refreshToken;
