@@ -66,8 +66,8 @@
         </div>
         <p class="adesc">
           Connect any OpenAI-compatible endpoint. LifeStack passes your table schema and can run
-          read-only analysis queries, plus write deduped records into local tables when you explicitly
-          ask it to import data.
+          read-only analysis queries, plus write or delete deduped records in local tables when you
+          explicitly ask it to modify data.
         </p>
       </div>
     </div>

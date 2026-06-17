@@ -311,8 +311,8 @@
         </button>
       </div>
       <p class="hint">
-        Upload screenshots, ask for extraction, and the assistant can save deduped records to your local
-        database. Enter to send, Shift+Enter for a new line.
+        Upload screenshots, ask for extraction, and the assistant can save or delete records in your local
+        database when you explicitly request it. Enter to send, Shift+Enter for a new line.
       </p>
     </div>
   </div>

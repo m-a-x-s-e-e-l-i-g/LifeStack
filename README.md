@@ -71,8 +71,8 @@ everything you have synced.
   OpenAI, a local **Ollama** (`/v1`), **LM Studio**, **vLLM**, and anything else compatible.
   Configure it in Settings or via `AI_BASE_URL` / `AI_MODEL` / `AI_API_KEY`.
 - **Grounded in your data.** The model is given your table schema and tools for analysis
-  (`run_sql`) plus explicit imports (`write_records`). Every query and write action is shown
-  beneath the answer.
+  (`run_sql`) plus explicit imports/deletes (`write_records`, `delete_records`). Every query
+  and write action is shown beneath the answer.
 - **Safe by construction.** SQL stays read-only (`SELECT` / `WITH` only, no table functions,
   no `system.*`, forced limits, `readonly=1`). Writes are limited to local domain tables and
   deduped by row hash, so re-uploading the same screenshot does not create double entries.

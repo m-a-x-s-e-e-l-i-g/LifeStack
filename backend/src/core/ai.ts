@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { client, getMeta, insert, query, setMeta } from "../db";
+import { client, command, getMeta, insert, query, setMeta } from "../db";
 import { env } from "../env";
 import { logger } from "../logger";
 
@@ -355,6 +355,101 @@ async function writeRecords(
   };
 }
 
+const DELETE_COLUMNS: Record<WriteTarget, string[]> = {
+  mobility_ride: ["day", "provider", "type", "distance_km", "duration_min", "cost"],
+  finance_tx: ["day", "description", "category", "amount"],
+  fuel_fillup: ["day", "liters", "price_per_liter", "cost", "odometer"],
+  energy_reading: ["day", "day_kwh", "night_kwh", "cost"],
+  food_order: [
+    "day",
+    "provider",
+    "merchant",
+    "total",
+    "currency",
+    "items",
+    "delivery_fee",
+    "service_fee",
+    "tip",
+    "notes",
+    "source",
+  ],
+};
+
+function lit(v: unknown): string {
+  if (typeof v === "number" && Number.isFinite(v)) return String(v);
+  if (typeof v === "boolean") return v ? "1" : "0";
+  const s = String(v ?? "").replace(/'/g, "''");
+  return `'${s}'`;
+}
+
+function whereSqlForTarget(target: WriteTarget, whereRaw: unknown): string {
+  if (!whereRaw || typeof whereRaw !== "object" || Array.isArray(whereRaw)) {
+    throw new Error("where must be an object");
+  }
+  const allowed = new Set(DELETE_COLUMNS[target]);
+  const where = whereRaw as Record<string, unknown>;
+  const clauses: string[] = [];
+
+  for (const [k, v] of Object.entries(where)) {
+    if (!allowed.has(k)) throw new Error(`Unsupported filter column: ${k}`);
+    if (Array.isArray(v)) {
+      if (v.length === 0) continue;
+      clauses.push(`${k} IN (${v.map((x) => lit(x)).join(", ")})`);
+      continue;
+    }
+    if (v === null || v === undefined || v === "") continue;
+    clauses.push(`${k} = ${lit(v)}`);
+  }
+
+  if (clauses.length === 0) {
+    throw new Error("At least one filter is required for delete_records");
+  }
+  return clauses.join(" AND ");
+}
+
+async function deleteRecords(
+  target: WriteTarget,
+  whereRaw: unknown,
+): Promise<Record<string, unknown>> {
+  const where = whereSqlForTarget(target, whereRaw);
+
+  const toDelete = await query<Record<string, unknown>>(
+    `SELECT * FROM ${target} WHERE ${where} LIMIT 5000`,
+  );
+  const matchedRows = await query<{ c: number }>(
+    `SELECT count() AS c FROM ${target} WHERE ${where}`,
+  );
+  const matched = matchedRows[0]?.c ?? 0;
+  if (matched === 0) {
+    return {
+      target,
+      matched: 0,
+      deletionScheduled: false,
+      message: "No rows matched the delete filter.",
+    };
+  }
+
+  await command(`ALTER TABLE ${target} DELETE WHERE ${where}`);
+
+  // Remove matching hashes from the dedupe ledger so equivalent rows can be
+  // imported again later if needed.
+  const hashes = new Set<string>();
+  for (const row of toDelete) hashes.add(stableHash(target, row));
+  if (hashes.size > 0) {
+    const hashList = [...hashes].map((h) => lit(h)).join(", ");
+    await command(
+      `ALTER TABLE ai_ingest_dedupe DELETE WHERE target = ${lit(target)} AND hash IN (${hashList})`,
+    );
+  }
+
+  return {
+    target,
+    matched,
+    deletionScheduled: true,
+    message: `Scheduled deletion for ${matched} row(s) from ${target}.`,
+  };
+}
+
 const TOOLS = [
   {
     type: "function",
@@ -405,6 +500,37 @@ const TOOLS = [
       },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "delete_records",
+      description:
+        "Delete matching records from a local LifeStack table. Use only when the user explicitly asks to remove data.",
+      parameters: {
+        type: "object",
+        properties: {
+          target: {
+            type: "string",
+            enum: [
+              "mobility_ride",
+              "finance_tx",
+              "fuel_fillup",
+              "energy_reading",
+              "food_order",
+            ],
+            description: "Target local table.",
+          },
+          where: {
+            type: "object",
+            description:
+              "Equality filters. Keys must be columns of the target table. At least one filter is required.",
+            additionalProperties: true,
+          },
+        },
+        required: ["target", "where"],
+      },
+    },
+  },
 ];
 
 function systemPrompt(schema: string): string {
@@ -420,7 +546,7 @@ Rules:
 - To get any number, call run_sql. Never invent values; if a query returns no rows, say the data is not there yet.
 - For screenshot imports, extract structured entries and call write_records with the correct target table and rows.
 - Food delivery screenshots (Uber Eats, takeaway.com, thuisbezorgd) should be written to food_order.
-- Only write when the user explicitly asks to save/import data.
+- Only modify data when the user explicitly asks, use write_records to add rows and delete_records to remove rows.
 - ClickHouse dialect: use today(), now(), toStartOfMonth(x), toYYYYMM(x), formatDateTime(x, '%b'), countIf(cond), sumIf(x, cond), uniqExact(x), arrayJoin(arr). Date math uses INTERVAL, e.g. today() - INTERVAL 12 MONTH.
 - Tables holding deduplicated entities use ReplacingMergeTree; add FINAL after the table name (e.g. FROM watch_history FINAL) so re-synced rows are not double counted.
 - Keep queries focused and always include a LIMIT for row listings.
@@ -538,6 +664,7 @@ export async function chat(
           sql?: string;
           target?: WriteTarget;
           rows?: unknown[];
+          where?: unknown;
         };
         if (call.function.name === "run_sql") {
           stepSql = String(args.sql ?? "");
@@ -559,6 +686,23 @@ export async function chat(
           }
           const result = await writeRecords(target, Array.isArray(args.rows) ? args.rows : []);
           stepSql = `write_records(${target})`;
+          stepRows = [result];
+          content = JSON.stringify(result);
+        } else if (call.function.name === "delete_records") {
+          const target = String(args.target ?? "") as WriteTarget;
+          if (
+            ![
+              "mobility_ride",
+              "finance_tx",
+              "fuel_fillup",
+              "energy_reading",
+              "food_order",
+            ].includes(target)
+          ) {
+            throw new Error("Unsupported delete target");
+          }
+          const result = await deleteRecords(target, args.where);
+          stepSql = `delete_records(${target})`;
           stepRows = [result];
           content = JSON.stringify(result);
         } else {
