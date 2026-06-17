@@ -21,6 +21,19 @@
   let busy = $state(false);
   let status = $state<string | null>(null);
 
+  // Trakt connects via an out-of-band PIN: once a Client ID is present we can
+  // build the authorize link the user opens to approve access and get the PIN.
+  const traktAuthorizeUrl = $derived.by(() => {
+    if (connector.id !== "trakt") return null;
+    const id = String(values.clientId ?? "").trim();
+    if (!id) return null;
+    const u = new URL("https://trakt.tv/oauth/authorize");
+    u.searchParams.set("response_type", "code");
+    u.searchParams.set("client_id", id);
+    u.searchParams.set("redirect_uri", "urn:ietf:wg:oauth:2.0:oob");
+    return u.toString();
+  });
+
   async function run(fn: () => Promise<void>, working = "Working…") {
     busy = true;
     status = working;
@@ -110,6 +123,20 @@
         </label>
       {/each}
     </div>
+  {/if}
+
+  {#if connector.id === "trakt"}
+    <p class="auth">
+      {#if traktAuthorizeUrl}
+        <a href={traktAuthorizeUrl} target="_blank" rel="noopener noreferrer" class="authlink">
+          Authorize on Trakt
+          <span class="go" aria-hidden="true">&rarr;</span>
+        </a>
+        <span class="authnote">Approve access, then paste the PIN below and save.</span>
+      {:else}
+        <span class="authnote">Enter your Client ID to reveal the authorize link.</span>
+      {/if}
+    </p>
   {/if}
 
   <div class="row">
@@ -247,6 +274,43 @@
     outline: none;
   }
   .help {
+    font-size: 11.5px;
+    color: var(--text-faint);
+  }
+
+  .auth {
+    margin: 0;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: var(--s2) var(--s3);
+  }
+  .authlink {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--accent);
+    text-decoration: none;
+    padding: 6px 11px;
+    border-radius: var(--r-sm);
+    border: 1px solid color-mix(in oklab, var(--accent) 40%, var(--border-strong));
+    background: color-mix(in oklab, var(--accent) 12%, transparent);
+    transition:
+      background 160ms ease,
+      transform 200ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  }
+  .authlink:hover {
+    background: color-mix(in oklab, var(--accent) 20%, transparent);
+  }
+  .authlink .go {
+    transition: transform 200ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  }
+  .authlink:hover .go {
+    transform: translateX(3px);
+  }
+  .authnote {
     font-size: 11.5px;
     color: var(--text-faint);
   }

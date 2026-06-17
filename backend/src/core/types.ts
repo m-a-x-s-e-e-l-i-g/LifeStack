@@ -27,7 +27,13 @@ export interface ModuleContext {
 }
 
 /** Context handed to a connector's sync/import. `config` is the connector's resolved config. */
-export type ConnectorContext = ModuleContext;
+export interface ConnectorContext extends ModuleContext {
+  /**
+   * Persist a patch into this connector's stored config. Used by OAuth-style
+   * connectors to save tokens after an exchange and clear single-use secrets.
+   */
+  saveConfig: (patch: Record<string, unknown>) => Promise<void>;
+}
 
 export type WidgetType =
   | "metric"

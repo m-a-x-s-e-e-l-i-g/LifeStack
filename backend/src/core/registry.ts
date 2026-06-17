@@ -4,6 +4,7 @@ import { modules } from "../modules";
 import type {
   Connector,
   ConfigField,
+  ConnectorContext,
   LifeStackModule,
   ModuleContext,
   SyncResult,
@@ -97,12 +98,13 @@ export function buildModuleContext(m: LifeStackModule): ModuleContext {
 export async function buildConnectorContext(
   m: LifeStackModule,
   c: Connector,
-): Promise<ModuleContext> {
+): Promise<ConnectorContext> {
   return {
     db,
     config: await resolveConnectorConfig(m, c),
     logger: logger.child(`${m.id}:${c.id}`),
     now: new Date(),
+    saveConfig: (patch) => setConnectorConfig(m.id, c.id, patch),
   };
 }
 

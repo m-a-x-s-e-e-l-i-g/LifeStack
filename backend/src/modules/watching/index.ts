@@ -5,6 +5,12 @@ const TRAKT_ICON = `<svg viewBox="0 0 24 24" width="100%" height="100%" fill="no
 
 const TRAKT = "https://api.trakt.tv";
 
+/**
+ * Out-of-band redirect URI for Trakt apps without a web callback. With this
+ * value set on the app, Trakt shows the user a PIN to paste back here.
+ */
+const TRAKT_REDIRECT = "urn:ietf:wg:oauth:2.0:oob";
+
 interface TraktIds {
   trakt?: number;
 }
@@ -67,6 +73,61 @@ async function traktGet<T>(
   return (await res.json()) as T;
 }
 
+interface TraktToken {
+  access_token: string;
+  refresh_token?: string;
+}
+
+/** POST the OAuth token endpoint with a grant body and parse the token pair. */
+async function traktToken(
+  body: Record<string, string>,
+  failure: string,
+): Promise<TraktToken> {
+  const res = await fetch(`${TRAKT}/oauth/token`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ...body, redirect_uri: TRAKT_REDIRECT }),
+  });
+  if (!res.ok) throw new Error(`${failure} (HTTP ${res.status}).`);
+  const tok = (await res.json()) as TraktToken;
+  if (!tok.access_token) throw new Error(`${failure}: no access token returned.`);
+  return tok;
+}
+
+/** Exchange a single-use PIN (authorization code) for an access + refresh token. */
+function traktExchangePin(
+  clientId: string,
+  clientSecret: string,
+  pin: string,
+): Promise<TraktToken> {
+  return traktToken(
+    {
+      code: pin,
+      client_id: clientId,
+      client_secret: clientSecret,
+      grant_type: "authorization_code",
+    },
+    "Trakt rejected the PIN. PINs are single use: open the authorize link again, copy a fresh code, paste it, and save",
+  );
+}
+
+/** Trade a refresh token for a fresh access token once the old one expires. */
+function traktRefresh(
+  clientId: string,
+  clientSecret: string,
+  refreshToken: string,
+): Promise<TraktToken> {
+  return traktToken(
+    {
+      refresh_token: refreshToken,
+      client_id: clientId,
+      client_secret: clientSecret,
+      grant_type: "refresh_token",
+    },
+    "Trakt could not refresh the session. Paste a fresh PIN to reconnect",
+  );
+}
+
 const trakt: Connector = {
   id: "trakt",
   name: "Trakt",
@@ -76,22 +137,77 @@ const trakt: Connector = {
   icon: TRAKT_ICON,
   syncIntervalMinutes: 360,
   configSchema: [
-    { key: "clientId", label: "Trakt client ID", type: "text", env: "TRAKT_CLIENT_ID" },
+    {
+      key: "clientId",
+      label: "Client ID",
+      type: "text",
+      env: "TRAKT_CLIENT_ID",
+      help: "From your Trakt app at https://trakt.tv/oauth/applications. Set the app's Redirect URI to urn:ietf:wg:oauth:2.0:oob.",
+    },
+    {
+      key: "clientSecret",
+      label: "Client secret",
+      type: "password",
+      secret: true,
+      env: "TRAKT_CLIENT_SECRET",
+      help: "From the same Trakt app. Used once to exchange your PIN for a token.",
+    },
+    {
+      key: "pin",
+      label: "Authorization PIN",
+      type: "text",
+      help: "Use the authorize link above to approve access, then paste the PIN here, save, and sync. It is exchanged for a token and cleared.",
+    },
     {
       key: "accessToken",
-      label: "Trakt access token",
+      label: "Access token (set automatically)",
       type: "password",
       secret: true,
       env: "TRAKT_ACCESS_TOKEN",
-      help: "OAuth access token from your Trakt application.",
+      help: "Filled in for you after the PIN exchange. Set manually only if you already have a token.",
     },
   ],
   async sync(ctx) {
-    const clientId = String(ctx.config.clientId ?? "");
-    const token = String(ctx.config.accessToken ?? "");
-    if (!clientId || !token)
-      throw new Error("Set a Trakt client ID and access token to sync");
-    const headers = traktHeaders(clientId, token);
+    const clientId = String(ctx.config.clientId ?? "").trim();
+    const clientSecret = String(ctx.config.clientSecret ?? "").trim();
+    const pin = String(ctx.config.pin ?? "").trim();
+    let token = String(ctx.config.accessToken ?? "").trim();
+    let refreshToken = String(ctx.config.refreshToken ?? "").trim();
+
+    if (!clientId)
+      throw new Error(
+        "Add your Trakt Client ID. Create an app at https://trakt.tv/oauth/applications with redirect URI urn:ietf:wg:oauth:2.0:oob.",
+      );
+
+    // A freshly pasted PIN wins: exchange it for a token, store it, clear the PIN.
+    if (pin) {
+      if (!clientSecret)
+        throw new Error("Add your Trakt Client Secret so the PIN can be exchanged for a token.");
+      const tok = await traktExchangePin(clientId, clientSecret, pin);
+      token = tok.access_token;
+      refreshToken = tok.refresh_token ?? "";
+      await ctx.saveConfig({ accessToken: token, refreshToken, pin: "" });
+    }
+
+    if (!token)
+      throw new Error(
+        "Connect Trakt: open the authorize link, paste the PIN into the connector, save, then sync.",
+      );
+
+    let headers = traktHeaders(clientId, token);
+
+    // Probe the session; if the stored token expired, refresh it once.
+    const probe = await fetch(`${TRAKT}/users/settings`, { headers });
+    if (probe.status === 401) {
+      if (!refreshToken || !clientSecret)
+        throw new Error("Trakt session expired. Paste a fresh PIN to reconnect.");
+      const tok = await traktRefresh(clientId, clientSecret, refreshToken);
+      token = tok.access_token;
+      refreshToken = tok.refresh_token ?? refreshToken;
+      await ctx.saveConfig({ accessToken: token, refreshToken });
+      headers = traktHeaders(clientId, token);
+    }
+
     let inserted = 0;
 
     // --- Watch history: movies + episodes, paginated (newest first) ---------

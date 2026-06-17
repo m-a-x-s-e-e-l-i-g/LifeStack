@@ -114,11 +114,32 @@ stats.
 
 ### Feeding real data
 
-- **API sync** (e.g. Trakt, Tibber): enable the connector in Settings, add a token, then
+- **API sync** (e.g. Tibber): enable the connector in Settings, add a token, then
   sync on a schedule or on demand from the UI, or
-  `POST /api/modules/<id>/connectors/<connector>/sync`.
+  `POST /api/modules/<id>/connectors/<connector>/sync`. Trakt connects with a one-time
+  PIN instead of a raw token, see [Connecting Trakt](#connecting-trakt).
 - **CSV / JSON import**: `POST /api/modules/<id>/connectors/csv/import` with
   `{ "rows": [ ... ] }`. Each module documents its row shape in the connector description.
+
+### Connecting Trakt
+
+Trakt authorizes with a PIN, so there is no callback server to run.
+
+1. Open https://trakt.tv/oauth/applications and click **New Application**.
+2. Give it any name. For **Redirect URI** enter `urn:ietf:wg:oauth:2.0:oob`. That OOB
+   (out of band) value is what makes Trakt show you a PIN instead of redirecting to a
+   website. Leave the rest blank and save.
+3. Open the app and copy its **Client ID** and **Client Secret**.
+4. In LifeStack **Settings**, find the Movies & TV > Trakt connector. Paste the Client ID
+   and Client Secret, then click **Save config**.
+5. Click **Authorize on Trakt** (the link appears once a Client ID is set), approve access,
+   and copy the **PIN** Trakt gives you.
+6. Paste the PIN into the connector, **Save config**, then **Sync**.
+
+On that first sync the PIN is exchanged for an access token (plus a refresh token) and then
+cleared, so it never lingers in config. LifeStack refreshes the token automatically after
+that, so this is a one-time step. Prefer environment variables? Put `TRAKT_CLIENT_ID` and
+`TRAKT_CLIENT_SECRET` in `.env` and you only need to paste the PIN.
 
 ## Architecture
 
@@ -260,7 +281,8 @@ All configuration is environment variables (see `.env.example`):
 | `FRONTEND_PORT`      | `3000`                      | Frontend port |
 | `BACKEND_URL`        | `http://backend:4000`       | Internal URL frontend uses |
 | `ORIGIN`             | `http://localhost:3000`     | Public origin (CSRF) |
-| `TRAKT_CLIENT_ID` / `TRAKT_ACCESS_TOKEN` | empty   | Movies & TV: Trakt connector credentials |
+| `TRAKT_CLIENT_ID` / `TRAKT_CLIENT_SECRET` | empty | Movies & TV: Trakt app credentials (see [Connecting Trakt](#connecting-trakt)) |
+| `TRAKT_ACCESS_TOKEN` | empty                       | Movies & TV: optional, a Trakt token you already minted (skips the PIN) |
 | `TIBBER_TOKEN`       | empty                       | Energy: Tibber connector token |
 
 The assistant and connector secrets can also be set at runtime in the Settings UI, which
@@ -305,7 +327,7 @@ Set `BACKEND_URL` in the frontend's shell to point at the local backend.
 ## Roadmap
 
 - [ ] More watching connectors: Letterboxd, Plex, Jellyfin
-- [ ] OAuth helper flow for API connectors (Trakt, Strava, etc.)
+- [ ] OAuth helper flow for more API connectors (Strava, etc.)
 - [ ] Finance and mobility API connectors (GoCardless, Strava, ride apps)
 - [ ] Cross-module "year in review" overview
 - [ ] Module marketplace / external module loading
