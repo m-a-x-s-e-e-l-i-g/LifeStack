@@ -1,8 +1,8 @@
 <script lang="ts">
   import type { PageData } from "./$types";
   import Widget from "$lib/components/Widget.svelte";
-  import { relativeTime } from "$lib/format";
-  import type { OverviewFeatured } from "$lib/types";
+  import { syncLabel, syncFailed } from "$lib/format";
+  import type { OverviewFeatured, SyncInfo } from "$lib/types";
 
   let { data }: { data: PageData } = $props();
 
@@ -18,7 +18,7 @@
     name: string;
     icon: string;
     accent: string;
-    lastSync: string | null;
+    lastSync: SyncInfo | null;
     widgets: OverviewFeatured["widget"][];
   };
 
@@ -79,7 +79,7 @@
             <h2>{g.name}</h2>
           </a>
           <a href="/m/{g.id}" class="view">
-            {#if g.lastSync}<span class="synced">synced {relativeTime(g.lastSync)}</span>{/if}
+            {#if g.lastSync?.at}<span class="synced" class:failed={syncFailed(g.lastSync)}>{syncLabel(g.lastSync)}</span>{/if}
             View module →
           </a>
         </div>
@@ -172,6 +172,9 @@
   .synced {
     font-family: var(--font-mono);
     font-size: 12px;
+  }
+  .synced.failed {
+    color: oklch(0.7 0.13 25);
   }
 
   .strip-grid {

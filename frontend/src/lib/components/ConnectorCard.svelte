@@ -2,7 +2,7 @@
   import type { ConnectorView } from "$lib/types";
   import { invalidateAll } from "$app/navigation";
   import { action } from "$lib/api";
-  import { relativeTime } from "$lib/format";
+  import { syncLabel, syncFailed } from "$lib/format";
 
   let { moduleId, connector, accent }: { moduleId: string; connector: ConnectorView; accent: string } =
     $props();
@@ -53,14 +53,6 @@
       await action(`/modules/${moduleId}/connectors/${connector.id}/${connector.enabled ? "disable" : "enable"}`);
       status = null;
     });
-
-  const sync = () =>
-    run(async () => {
-      const r = await action<{ inserted?: number; updated?: number }>(
-        `/modules/${moduleId}/connectors/${connector.id}/sync`,
-      );
-      status = `Synced (+${r.inserted ?? 0} new)`;
-    }, "Syncing…");
 
   const save = () =>
     run(async () => {
@@ -187,11 +179,10 @@
           {@render pinRow()}
         {:else}
           <p class="tk-hint">
-            Your account is linked. Sync to pull watch history, ratings, watchlist, collection and
-            stats.
+            Your account is linked. LifeStack syncs your watch history, ratings, watchlist,
+            collection and stats automatically.
           </p>
           <div class="tk-actions">
-            <button class="btn" onclick={sync} disabled={busy || !connector.enabled}>Sync now</button>
             <button class="btn btn--ghost" onclick={() => (reauth = true)} disabled={busy}>
               Reconnect
             </button>
@@ -274,9 +265,6 @@
         {#if connector.config.length}
           <button class="btn btn--ghost" onclick={save} disabled={busy}>Save config</button>
         {/if}
-        {#if connector.hasSync}
-          <button class="btn" onclick={sync} disabled={busy || !connector.enabled}>Sync</button>
-        {/if}
       {/if}
       {#if connector.hasImport}
         <span class="importnote">CSV import via API</span>
@@ -284,7 +272,11 @@
     </div>
     <div class="right">
       {#if status}<span class="status">{status}</span>{/if}
-      {#if connector.lastSync}<span class="last">last sync {relativeTime(connector.lastSync)}</span>{/if}
+      {#if connector.hasSync}
+        <span class="last" class:failed={syncFailed(connector.lastSync)}>
+          {syncLabel(connector.lastSync)}
+        </span>
+      {/if}
     </div>
   </div>
 </div>
@@ -547,5 +539,8 @@
   }
   .last {
     font-family: var(--font-mono);
+  }
+  .last.failed {
+    color: oklch(0.7 0.13 25);
   }
 </style>

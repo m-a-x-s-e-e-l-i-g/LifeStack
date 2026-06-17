@@ -87,7 +87,7 @@ in through **connectors** (pluggable sources). Ships with five modules:
 
 | Module          | Domain              | Connectors                  | Sample statistics |
 |-----------------|---------------------|-----------------------------|-------------------|
-| **Movies & TV** | Everything you watch | Trakt (API), CSV import     | Films and episodes per year, hours watched, watch calendar, top genres and shows, ratings, watchlist, collection |
+| **Movies & TV** | Everything you watch | Trakt (API)                 | Watched summary (last 30 days and all time), films and episodes watched, hours watched, plays per month, watch calendar, top genres and shows, ratings, watchlist, collection |
 | **Finance**     | Bank transfers       | CSV / JSON import           | Monthly cash flow, spend by category, balance trend, top merchants |
 | **Energy**      | Home electricity     | Tibber (API), CSV import    | kWh per month, day vs night split, cost, usage calendar |
 | **Fuel**        | Fuel consumption     | CSV / JSON import           | L/100km economy, price/L trend, cost per month, total spend |
@@ -114,10 +114,10 @@ stats.
 
 ### Feeding real data
 
-- **API sync** (e.g. Tibber): enable the connector in Settings, add a token, then
-  sync on a schedule or on demand from the UI, or
-  `POST /api/modules/<id>/connectors/<connector>/sync`. Trakt connects with a one-time
-  PIN instead of a raw token, see [Connecting Trakt](#connecting-trakt).
+- **API sync** (e.g. Tibber): enable the connector in Settings, add a token, and LifeStack
+  syncs automatically on a schedule (and right after you connect). You can still trigger one
+  manually with `POST /api/modules/<id>/connectors/<connector>/sync`. Trakt connects with a
+  one-time PIN instead of a raw token, see [Connecting Trakt](#connecting-trakt).
 - **CSV / JSON import**: `POST /api/modules/<id>/connectors/csv/import` with
   `{ "rows": [ ... ] }`. Each module documents its row shape in the connector description.
 
@@ -133,7 +133,8 @@ Trakt authorizes with a PIN, so there is no callback server to run.
 4. In LifeStack **Settings**, find the Movies & TV > Trakt connector. Paste the Client ID
    and Client Secret, then click **Save credentials**.
 5. Click **Authorize on Trakt**, approve access, and copy the **PIN** Trakt gives you.
-6. Paste the PIN and click **Connect**. Once connected, click **Sync now** to pull your data.
+6. Paste the PIN and click **Connect**. LifeStack syncs your Trakt data automatically in the
+   background from then on, no manual sync needed.
 
 The PIN is exchanged immediately for an access token (plus a refresh token); the PIN itself is
 never stored. LifeStack refreshes the token automatically afterward, so connecting is a one-time

@@ -195,7 +195,7 @@ export async function lastSync(
     params.c = connectorId;
   }
   const rows = await query<{ finished_at: string; status: string; message: string }>(
-    `SELECT formatDateTime(finished_at, '%Y-%m-%dT%H:%M:%SZ') AS finished_at, status, message
+    `SELECT formatDateTime(finished_at, '%Y-%m-%dT%H:%i:%SZ') AS finished_at, status, message
      FROM sync_log WHERE ${filter} ORDER BY finished_at DESC LIMIT 1`,
     params,
   );

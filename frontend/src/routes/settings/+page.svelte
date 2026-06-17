@@ -133,7 +133,7 @@
 
       <div class="conns">
         {#each m.connectors as c (c.id)}
-          {#key `${c.id}-${c.enabled}-${c.lastSync}`}
+          {#key `${c.id}-${c.enabled}-${c.lastSync?.at ?? ""}`}
             <ConnectorCard moduleId={m.id} connector={c} accent={m.accent} />
           {/key}
         {/each}

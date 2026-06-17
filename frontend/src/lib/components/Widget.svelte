@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { WidgetResult } from "$lib/types";
   import Metric from "./Metric.svelte";
+  import StatPanel from "./StatPanel.svelte";
   import BarChart from "./BarChart.svelte";
   import LineChart from "./LineChart.svelte";
   import DonutChart from "./DonutChart.svelte";
@@ -18,6 +19,11 @@
       switch (widget.type) {
         case "metric":
           return d.value === undefined || d.value === null;
+        case "statpanel":
+          return (
+            !d.segments?.length ||
+            d.segments.every((s: any) => s.rows?.every((r: any) => !r.minutes && !r.count))
+          );
         case "bar":
         case "line":
           return !d.series?.length;
@@ -49,6 +55,8 @@
       <p class="note">No data yet. Connect a source or import a file to populate this.</p>
     {:else if widget.type === "metric"}
       <Metric data={d} {accent} />
+    {:else if widget.type === "statpanel"}
+      <StatPanel data={d} {accent} />
     {:else if widget.type === "bar"}
       <BarChart data={d} {accent} />
     {:else if widget.type === "line"}

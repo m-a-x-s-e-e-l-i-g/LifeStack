@@ -10,7 +10,6 @@
   const m = $derived(data.stats.module);
   const detail = $derived(data.detail);
   const widgets = $derived(data.stats.widgets ?? []);
-  const canSync = $derived(detail.connectors.some((c) => c.hasSync && c.enabled));
 
   let busy = $state(false);
   let status = $state<string | null>(null);
@@ -34,20 +33,6 @@
       busy = false;
     }
   }
-
-  async function sync() {
-    busy = true;
-    status = "Syncing…";
-    try {
-      await action(`/modules/${m.id}/sync`);
-      await invalidateAll();
-      status = "Synced";
-    } catch (e) {
-      status = e instanceof Error ? e.message : "Sync failed";
-    } finally {
-      busy = false;
-    }
-  }
 </script>
 
 <svelte:head><title>LifeStack — {m.name}</title></svelte:head>
@@ -62,13 +47,10 @@
       </div>
     </div>
     <div class="actions">
-      {#if data.stats.enabled}
-        {#if canSync}
-          <button class="btn" onclick={sync} disabled={busy}>{busy ? "Working…" : "Sync now"}</button>
-        {/if}
-        {#if status}<span class="status">{status}</span>{/if}
-      {:else}
+      {#if !data.stats.enabled}
         <button class="btn btn--primary" onclick={enable} disabled={busy}>Enable module</button>
+      {:else if status}
+        <span class="status">{status}</span>
       {/if}
     </div>
   </header>
@@ -80,7 +62,7 @@
           {#if c.icon}<span class="cicon">{@html c.icon}</span>{:else}<span class="cdot"></span>{/if}
           {c.name}
           <span class="kind">{c.kind}</span>
-          {#if c.lastSync}<span class="cwhen">{relativeTime(c.lastSync)}</span>{/if}
+          {#if c.lastSync?.at}<span class="cwhen">{relativeTime(c.lastSync.at)}</span>{/if}
         </a>
       {/each}
     </div>

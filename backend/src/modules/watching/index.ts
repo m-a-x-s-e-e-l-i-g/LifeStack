@@ -40,16 +40,6 @@ function isoDate(v: unknown): string {
   return String(v ?? "").slice(0, 10);
 }
 
-/** Stable positive integer id for rows that have no Trakt history id (CSV). */
-function hashId(s: string): number {
-  let h = 2166136261;
-  for (let i = 0; i < s.length; i++) {
-    h ^= s.charCodeAt(i);
-    h = Math.imul(h, 16777619);
-  }
-  return (h >>> 0) + 1;
-}
-
 async function chunkedInsert(
   ctx: ModuleContext,
   table: string,
@@ -393,38 +383,6 @@ const trakt: Connector = {
   },
 };
 
-const csv: Connector = {
-  id: "csv",
-  name: "CSV / JSON import",
-  description: "Import movie watches. Rows: {watched_at, title, year, runtime, genre}.",
-  kind: "import",
-  async import(ctx, rows) {
-    const values = rows
-      .filter((r): r is Record<string, unknown> => typeof r === "object" && r !== null)
-      .map((r) => {
-        const title = String(r.title ?? "Untitled");
-        const watchedAt = String(r.watched_at ?? r.date ?? new Date().toISOString());
-        const genre = r.genre != null ? String(r.genre) : "";
-        return {
-          history_id: hashId(`${title}@${watchedAt}`),
-          kind: "movie",
-          watched_at: watchedAt,
-          watched_day: isoDate(watchedAt),
-          title,
-          episode_title: "",
-          season: 0,
-          number: 0,
-          year: r.year != null ? Number(r.year) : 0,
-          runtime: Number(r.runtime ?? 0),
-          genres: genre ? [genre] : [],
-          trakt_id: 0,
-        };
-      });
-    await chunkedInsert(ctx, "watch_history", values);
-    return { inserted: values.length };
-  },
-};
-
 const watching: LifeStackModule = {
   id: "watching",
   name: "Movies & TV",
@@ -477,19 +435,76 @@ const watching: LifeStackModule = {
        updated_at DateTime64(3) DEFAULT now64(3)
      ) ENGINE = ReplacingMergeTree(updated_at) ORDER BY metric`,
   ],
-  connectors: [trakt, csv],
+  connectors: [trakt],
   widgets: [
+    {
+      id: "watched-summary",
+      title: "Watched",
+      type: "statpanel",
+      size: "md",
+      featured: true,
+      async query(ctx) {
+        const stats = await ctx.db.query<{ metric: string; value: number }>(
+          `SELECT metric, value FROM watch_stats FINAL
+           WHERE metric IN ('movies_minutes','movies_watched','episodes_minutes','episodes_watched')`,
+        );
+        const sv = (k: string) => Number(stats.find((r) => r.metric === k)?.value ?? 0);
+
+        const allTime = await ctx.db.query<{ kind: string; minutes: number; plays: number }>(
+          `SELECT kind, toInt64(sum(runtime)) AS minutes, toInt64(count()) AS plays
+           FROM watch_history FINAL GROUP BY kind`,
+        );
+        const recent = await ctx.db.query<{ kind: string; minutes: number; plays: number }>(
+          `SELECT kind, toInt64(sum(runtime)) AS minutes, toInt64(count()) AS plays
+           FROM watch_history FINAL WHERE watched_day >= today() - INTERVAL 30 DAY GROUP BY kind`,
+        );
+        const pick = (
+          rows: { kind: string; minutes: number; plays: number }[],
+          kind: string,
+        ) => rows.find((r) => r.kind === kind) ?? { minutes: 0, plays: 0 };
+
+        // Prefer Trakt's profile totals for all-time; fall back to local history.
+        const allEpMin = sv("episodes_minutes") || Number(pick(allTime, "episode").minutes);
+        const allEpCnt = sv("episodes_watched") || Number(pick(allTime, "episode").plays);
+        const allMvMin = sv("movies_minutes") || Number(pick(allTime, "movie").minutes);
+        const allMvCnt = sv("movies_watched") || Number(pick(allTime, "movie").plays);
+        const recEp = pick(recent, "episode");
+        const recMv = pick(recent, "movie");
+
+        return {
+          segments: [
+            {
+              label: "Last 30 days",
+              rows: [
+                { kind: "Shows", minutes: Number(recEp.minutes), count: Number(recEp.plays), countUnit: "eps" },
+                { kind: "Movies", minutes: Number(recMv.minutes), count: Number(recMv.plays), countUnit: "movies" },
+              ],
+            },
+            {
+              label: "All time",
+              rows: [
+                { kind: "Shows", minutes: allEpMin, count: allEpCnt, countUnit: "eps" },
+                { kind: "Movies", minutes: allMvMin, count: allMvCnt, countUnit: "movies" },
+              ],
+            },
+          ],
+        };
+      },
+    },
     {
       id: "films-year",
       title: "Films watched",
-      subtitle: "Last 12 months",
+      subtitle: "All time",
       type: "metric",
       size: "sm",
       featured: true,
       async query(ctx) {
+        const s = await ctx.db.query<{ v: number }>(
+          `SELECT toInt32(value) AS v FROM watch_stats FINAL WHERE metric = 'movies_watched' LIMIT 1`,
+        );
+        if (s[0]?.v) return { value: s[0].v, unit: "films" };
         const rows = await ctx.db.query<{ v: number }>(
-          `SELECT toInt32(countIf(kind = 'movie' AND watched_day >= today() - INTERVAL 12 MONTH)) AS v
-           FROM watch_history FINAL`,
+          `SELECT toInt32(count()) AS v FROM watch_history FINAL WHERE kind = 'movie'`,
         );
         return { value: rows[0]?.v ?? 0, unit: "films" };
       },
@@ -497,14 +512,17 @@ const watching: LifeStackModule = {
     {
       id: "episodes-year",
       title: "Episodes watched",
-      subtitle: "Last 12 months",
+      subtitle: "All time",
       type: "metric",
       size: "sm",
       featured: true,
       async query(ctx) {
+        const s = await ctx.db.query<{ v: number }>(
+          `SELECT toInt32(value) AS v FROM watch_stats FINAL WHERE metric = 'episodes_watched' LIMIT 1`,
+        );
+        if (s[0]?.v) return { value: s[0].v, unit: "episodes" };
         const rows = await ctx.db.query<{ v: number }>(
-          `SELECT toInt32(countIf(kind = 'episode' AND watched_day >= today() - INTERVAL 12 MONTH)) AS v
-           FROM watch_history FINAL`,
+          `SELECT toInt32(count()) AS v FROM watch_history FINAL WHERE kind = 'episode'`,
         );
         return { value: rows[0]?.v ?? 0, unit: "episodes" };
       },
@@ -512,14 +530,18 @@ const watching: LifeStackModule = {
     {
       id: "hours",
       title: "Hours watched",
-      subtitle: "Last 12 months",
+      subtitle: "All time",
       type: "metric",
       size: "sm",
       featured: true,
       async query(ctx) {
+        const s = await ctx.db.query<{ v: number }>(
+          `SELECT toInt32(round(sum(value) / 60)) AS v FROM watch_stats FINAL
+           WHERE metric IN ('movies_minutes','episodes_minutes')`,
+        );
+        if (s[0]?.v) return { value: s[0].v, unit: "h" };
         const rows = await ctx.db.query<{ v: number }>(
-          `SELECT toInt32(round(sum(runtime) / 60)) AS v
-           FROM watch_history FINAL WHERE watched_day >= today() - INTERVAL 12 MONTH`,
+          `SELECT toInt32(round(sum(runtime) / 60)) AS v FROM watch_history FINAL`,
         );
         return { value: rows[0]?.v ?? 0, unit: "h" };
       },
@@ -527,6 +549,7 @@ const watching: LifeStackModule = {
     {
       id: "unique",
       title: "Unique titles",
+      subtitle: "All time",
       type: "metric",
       size: "sm",
       async query(ctx) {
@@ -571,14 +594,23 @@ const watching: LifeStackModule = {
     {
       id: "monthly",
       title: "Plays per month",
+      subtitle: "This year",
       type: "bar",
       size: "lg",
       async query(ctx) {
         const rows = await ctx.db.query(
-          `SELECT formatDateTime(m, '%b') AS label, toInt32(count()) AS value
-           FROM (SELECT toStartOfMonth(watched_day) AS m FROM watch_history FINAL
-                 WHERE watched_day >= toStartOfMonth(today()) - INTERVAL 11 MONTH)
-           GROUP BY m ORDER BY m`,
+          `SELECT formatDateTime(months.mm, '%b') AS label, toInt32(ifNull(plays.c, 0)) AS value
+           FROM (
+             SELECT addMonths(toStartOfYear(today()), number) AS mm
+             FROM numbers(toMonth(today()))
+           ) AS months
+           LEFT JOIN (
+             SELECT toStartOfMonth(watched_day) AS m, count() AS c
+             FROM watch_history FINAL
+             WHERE watched_day >= toStartOfYear(today())
+             GROUP BY m
+           ) AS plays ON months.mm = plays.m
+           ORDER BY months.mm`,
         );
         return { series: rows, unit: "plays" };
       },

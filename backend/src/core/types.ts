@@ -37,6 +37,7 @@ export interface ConnectorContext extends ModuleContext {
 
 export type WidgetType =
   | "metric"
+  | "statpanel"
   | "bar"
   | "line"
   | "donut"

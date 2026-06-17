@@ -1,5 +1,19 @@
-export type WidgetType = "metric" | "bar" | "line" | "donut" | "calendar" | "list" | "table";
+export type WidgetType =
+  | "metric"
+  | "statpanel"
+  | "bar"
+  | "line"
+  | "donut"
+  | "calendar"
+  | "list"
+  | "table";
 export type WidgetSize = "sm" | "md" | "lg" | "xl";
+
+export interface SyncInfo {
+  at: string | null;
+  status: string | null;
+  message: string | null;
+}
 
 export interface ModuleMeta {
   id: string;
@@ -15,7 +29,7 @@ export interface ModuleSummary extends ModuleMeta {
   enabledConnectors: number;
   hasApi: boolean;
   widgetCount: number;
-  lastSync: string | null;
+  lastSync: SyncInfo | null;
 }
 
 export interface WidgetResult {
@@ -34,6 +48,15 @@ export interface MetricData {
   format?: string;
   delta?: number;
   deltaLabel?: string;
+}
+export interface StatPanelRow {
+  kind: string;
+  minutes: number;
+  count: number;
+  countUnit?: string;
+}
+export interface StatPanelData {
+  segments: { label: string; rows: StatPanelRow[] }[];
 }
 export interface SeriesPoint {
   label: string;
@@ -90,13 +113,13 @@ export interface ConnectorView {
   hasImport: boolean;
   syncIntervalMinutes: number | null;
   config: ConfigField[];
-  lastSync: string | null;
+  lastSync: SyncInfo | null;
 }
 
 export interface ModuleDetail extends ModuleMeta {
   enabled: boolean;
   widgetCount: number;
-  lastSync: string | null;
+  lastSync: SyncInfo | null;
   connectors: ConnectorView[];
 }
 
@@ -105,7 +128,7 @@ export interface OverviewFeatured extends ModuleMeta {
 }
 
 export interface OverviewData {
-  modules: (ModuleMeta & { enabled: boolean; lastSync: string | null })[];
+  modules: (ModuleMeta & { enabled: boolean; lastSync: SyncInfo | null })[];
   featured: OverviewFeatured[];
 }
 

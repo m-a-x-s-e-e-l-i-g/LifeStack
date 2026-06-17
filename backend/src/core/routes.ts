@@ -17,6 +17,7 @@ import {
   setModuleEnabled,
 } from "./registry";
 import { aiStatus, chat, setAiConfig, type ChatMessage } from "./ai";
+import { triggerSync } from "./scheduler";
 
 function meta(m: LifeStackModule) {
   return {
@@ -150,6 +151,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       const r = await resolve(req.params.id, req.params.cid, reply);
       if (!r) return;
       await setConnectorEnabled(r.m.id, r.c.id, true);
+      // Sync straight away so stats populate without a manual trigger.
+      if (r.c.sync) triggerSync(r.m.id, r.c.id);
       return { ok: true, enabled: true };
     },
   );
@@ -199,6 +202,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     if (!r.c.authorize) return reply.code(400).send({ error: "connector has no authorize" });
     try {
       const result = await runConnectorAuthorize(r.m, r.c, req.body ?? {});
+      // A successful connect means we have a token; sync right away.
+      if (r.c.sync && !req.body?.disconnect) triggerSync(r.m.id, r.c.id, 500);
       return { ok: true, ...result, connector: await connectorView(r.m, r.c) };
     } catch (err) {
       return reply
