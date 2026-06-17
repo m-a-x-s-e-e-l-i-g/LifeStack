@@ -3,7 +3,7 @@ import type { LifeStackModule } from "../../core/types";
 const providerLabelExpr = `multiIf(
   lowerUTF8(provider) LIKE '%uber%', 'Uber 🚕',
   lowerUTF8(provider) LIKE '%bolt%', 'Bolt ⚡',
-  lowerUTF8(provider) LIKE '%lime%', 'Lime 🛴',
+  lowerUTF8(provider) LIKE '%lime%', 'Lime 🍋‍🟩',
   lowerUTF8(provider) LIKE '%tier%', 'Tier 🛴',
   lowerUTF8(provider) LIKE '%bird%', 'Bird 🛴',
   lowerUTF8(provider) LIKE '%lyft%', 'Lyft 🚕',
