@@ -2,18 +2,19 @@
 
 # LifeStack
 
-**Your life, in numbers. Self-hosted, modular, and yours alone.**
+**Your life, in numbers. Self-hosted, modular, AI-first, and yours alone.**
 
 LifeStack is a Docker-first personal statistics platform. Plug in modules for the things
-you do (watch movies, spend money, burn fuel, use energy, take scooter rides) and get a
-dashboard of statistics that actually fit each domain. No cloud, no telemetry, no account.
-Just `docker compose up`.
+you do (watch movies and shows, spend money, burn fuel, use energy, take scooter rides),
+store everything in ClickHouse, and ask a built-in assistant questions about it in plain
+language. No cloud, no telemetry, no account, no mock data. Just `docker compose up`.
 
-[Quick start](#quick-start) · [Modules](#modules) · [Write a module](#writing-a-module) · [Architecture](#architecture)
+[Quick start](#quick-start) · [Assistant](#the-assistant) · [Modules](#modules) · [Write a module](#writing-a-module) · [Architecture](#architecture)
 
 ![License: MIT](https://img.shields.io/badge/license-MIT-amber)
 ![Docker](https://img.shields.io/badge/docker-compose-blue)
-![Backend](https://img.shields.io/badge/backend-Node%20%2B%20Fastify-green)
+![Database](https://img.shields.io/badge/database-ClickHouse-yellow)
+![Assistant](https://img.shields.io/badge/assistant-OpenAI--compatible-7c3aed)
 ![Frontend](https://img.shields.io/badge/frontend-SvelteKit-orange)
 
 </div>
@@ -23,16 +24,19 @@ Just `docker compose up`.
 ## Why
 
 Your data is scattered across a dozen apps that each show you one slice and keep the rest.
-LifeStack pulls those slices onto one machine you control and turns them into a quiet,
-beautiful almanac of your own life. It is modular by design: the **backend aggregates**,
-and each **module** owns its own sync, storage, and a set of statistics tailored to its
-domain. A fuel module shows L/100km and price-per-liter trends; a finance module shows
-cash flow and category breakdowns. Same platform, domain-appropriate stats.
+LifeStack pulls those slices onto one machine you control, stores them in a column database
+built for analytics, and turns them into a quiet, beautiful almanac of your own life. It is
+modular by design: the **backend aggregates**, and each **module** owns its own sync,
+storage, and a set of statistics tailored to its domain. A fuel module shows L/100km and
+price-per-liter trends; a finance module shows cash flow and category breakdowns. Same
+platform, domain-appropriate stats.
 
-- **Local / self-hosted first.** Runs entirely on your hardware. Postgres is the only state.
+- **Local / self-hosted first.** Runs entirely on your hardware. ClickHouse holds the state.
+- **AI-first.** A chat assistant sits at the front door and answers questions by writing
+  read-only SQL against your own data. Point it at any OpenAI-compatible endpoint.
 - **Modular.** Enable, disable, and configure modules at runtime. Write your own in one file.
 - **Docker-first.** Three services, one command, sensible defaults.
-- **Demo data included.** First boot is a populated dashboard, not an empty shell.
+- **No mock data.** Modules start empty and fill up only when you connect a real source.
 
 ## Quick start
 
@@ -43,35 +47,57 @@ cp .env.example .env        # tweak ports/secrets if you like
 docker compose up -d --build
 ```
 
-Then open **http://localhost:3000**.
+Then open **http://localhost:3000**. You land on the **assistant**. It starts unconnected,
+so head to **Settings** to:
 
-By default `SEED_DEMO=true`, so you land on a fully populated dashboard with five demo
-modules. Head to **Settings** to enable/disable modules, drop in API tokens, or trigger a
-sync. Set `SEED_DEMO=false` in `.env` for a clean, empty install.
+1. Point the assistant at an LLM (a local Ollama, LM Studio, or a hosted provider).
+2. Enable the modules you want and connect a source (a Trakt token, a Tibber token, or a
+   CSV import).
+
+Until you connect a source, modules stay empty by design.
 
 ```
-frontend  →  http://localhost:3000      (SvelteKit dashboard)
-backend   →  http://localhost:4000      (aggregator REST API)
-postgres  →  localhost:5432             (state)
+frontend   →  http://localhost:3000      (SvelteKit dashboard + chat)
+backend    →  http://localhost:4000      (aggregator REST API)
+clickhouse →  http://localhost:8123      (analytics database, HTTP)
 ```
+
+## The assistant
+
+LifeStack is chat-first: the home page is an assistant that can answer questions about
+everything you have synced.
+
+- **Provider-agnostic.** It speaks the OpenAI `/chat/completions` protocol, so it works with
+  OpenAI, a local **Ollama** (`/v1`), **LM Studio**, **vLLM**, and anything else compatible.
+  Configure it in Settings or via `AI_BASE_URL` / `AI_MODEL` / `AI_API_KEY`.
+- **Grounded in your data.** The model is given your table schema and a single tool,
+  `run_sql`, that executes one **read-only** ClickHouse `SELECT` at a time. Every query it
+  runs is shown beneath the answer, so nothing is a black box.
+- **Safe by construction.** The SQL tool rejects anything that is not a single `SELECT` /
+  `WITH`, blocks DDL/DML, table functions, and `system.*` tables, forces a row limit, and
+  runs with `readonly=1`. The assistant can read your stats; it can never change them.
+
+Ask things like *"How many films and episodes did I watch this year?"*, *"What did I spend
+the most on last month?"*, or *"Show my electricity cost by month."*
 
 ## Modules
 
 Each module is a **domain** that owns its schema, statistics, and accent color. Data flows
 in through **connectors** (pluggable sources). Ships with five modules:
 
-| Module      | Domain            | Connectors                       | Sample statistics |
-|-------------|-------------------|----------------------------------|-------------------|
-| **Movies**  | Films watched     | Trakt (API), CSV import          | Films watched, hours, watch calendar, top genres, monthly history |
-| **Finance** | Bank transfers    | CSV / JSON import                | Monthly cash flow, spend by category, balance trend, top categories |
-| **Energy**  | Home electricity  | Tibber (API), CSV import         | kWh per month, day vs night split, cost, usage calendar |
-| **Fuel**    | Fuel consumption  | CSV / JSON import                | L/100km economy, price/L trend, cost per month, distance |
-| **Mobility**| Scooter & rides   | CSV / JSON import                | Rides per provider, spend, distance, monthly trend |
+| Module          | Domain              | Connectors                  | Sample statistics |
+|-----------------|---------------------|-----------------------------|-------------------|
+| **Movies & TV** | Everything you watch | Trakt (API), CSV import     | Films and episodes per year, hours watched, watch calendar, top genres and shows, ratings, watchlist, collection |
+| **Finance**     | Bank transfers       | CSV / JSON import           | Monthly cash flow, spend by category, balance trend, top merchants |
+| **Energy**      | Home electricity     | Tibber (API), CSV import    | kWh per month, day vs night split, cost, usage calendar |
+| **Fuel**        | Fuel consumption     | CSV / JSON import           | L/100km economy, price/L trend, cost per month, total spend |
+| **Mobility**    | Scooter & rides      | CSV / JSON import           | Rides per provider, spend, distance, monthly trend |
 
-**Trakt** and **Tibber** are real, working API connectors. The roadmap adds more
-(Letterboxd and Plex for movies, GoCardless for finance, Strava, and others). Every module
-runs in **demo mode** out of the box (synthetic but realistic data) so you can see the
-dashboard before wiring up real sources.
+The **Trakt** connector performs a **full sync**: watch history (movies and episodes),
+ratings (movies, shows, seasons, episodes), watchlist, collection, and your profile stats.
+**Tibber** is a real, working energy connector. Everything is API-first; CSV / JSON import
+is always available as a fallback, and the roadmap adds more API sources (Letterboxd and
+Plex for watching, GoCardless for finance, Strava and ride apps for mobility).
 
 ### Modules and connectors
 
@@ -80,10 +106,11 @@ The platform separates the **what** from the **where**:
 - A **module** is a domain. It defines the database tables, the widgets (statistics), and
   an accent color. It does not care where data comes from.
 - A **connector** is a data source attached to a module. It has its own config (API keys),
-  its own enable switch, and either a `sync` (for APIs) or an `import` (for CSV / JSON).
+  its own enable switch, an optional brand icon, and either a `sync` (for APIs) or an
+  `import` (for CSV / JSON).
 
-So the Movies module can pull from Trakt today and Letterboxd tomorrow, into the same
-stats. Everything is API-first; CSV / manual import is always available as a fallback.
+So the Movies & TV module can pull from Trakt today and Letterboxd tomorrow, into the same
+stats.
 
 ### Feeding real data
 
@@ -98,6 +125,7 @@ stats. Everything is API-first; CSV / manual import is always available as a fal
 ```
                        ┌────────────────────────────┐
    browser  ──────────▶│  frontend (SvelteKit)      │
+                       │  · assistant (chat)        │
                        │  · dashboard + charts      │
                        │  · /api/* proxy ───────────┼──┐
                        └────────────────────────────┘  │  internal docker network
@@ -107,27 +135,33 @@ stats. Everything is API-first; CSV / manual import is always available as a fal
                        │                                            │
                        │   core/                                    │
                        │    ├─ registry   enable·config·discover    │
-                       │    ├─ scheduler  periodic module sync      │
-                       │    ├─ db         pool + migration runner   │
-                       │    └─ routes     REST API                  │
+                       │    ├─ scheduler  periodic connector sync   │
+                       │    ├─ db         ClickHouse client + DDL    │
+                       │    ├─ ai         chat + read-only SQL tool  │
+                       │    └─ routes     REST API + /api/chat       │
                        │                                            │
                        │   modules/                                 │
-                       │    ├─ movies  ├─ finance  ├─ fuel          │
-                       │    ├─ energy  └─ mobility                  │
+                       │    ├─ watching ├─ finance  ├─ fuel         │
+                       │    ├─ energy   └─ mobility                 │
                        │       module: migrations · widgets         │
                        │       connectors: trakt · tibber · csv     │
                        └───────────────────────┬────────────────────┘
                                                ▼
                                       ┌──────────────────┐
-                                      │  postgres        │
+                                      │  clickhouse      │
                                       └──────────────────┘
 ```
 
 - The **frontend** never talks to the backend directly from the browser. It proxies through
   its own server (`/api/[...path]`), so the only origin a browser sees is the frontend.
 - The **backend** discovers modules at boot, runs their migrations, exposes their widgets,
-  and schedules each enabled connector's sync. Module/connector state lives in Postgres.
+  schedules each enabled connector's sync, and serves the assistant. State lives in
+  ClickHouse.
 - A **module** owns a domain (tables + widgets). Its **connectors** bring the data in.
+
+ClickHouse has no `UPDATE`/`UPSERT` in the usual sense, so mutable state (module and
+connector toggles, deduplicated entities) uses `ReplacingMergeTree` tables read with
+`FINAL`, while event-like data (sync log, transactions) is plain append-only `MergeTree`.
 
 ## Writing a module
 
@@ -144,8 +178,12 @@ const phoneExport: Connector = {
   description: "Import a step export. Rows: {day, steps}.",
   kind: "import",
   async import(ctx, rows) {
-    // map rows -> INSERT; return how many landed
-    return { inserted: rows.length };
+    const values = (rows as Record<string, unknown>[]).map((r) => ({
+      day: String(r.day).slice(0, 10),
+      steps: Number(r.steps ?? 0),
+    }));
+    await ctx.db.insert("steps_day", values);   // batch insert (JSONEachRow)
+    return { inserted: values.length };
   },
 };
 
@@ -154,35 +192,33 @@ const steps: LifeStackModule = {
   name: "Steps",
   description: "Daily step count.",
   icon: "🚶",
-  accent: "oklch(0.74 0.14 320)",            // this module's color, used in its charts
+  accent: "oklch(0.74 0.14 320)",               // this module's color, used in its charts
 
   migrations: [
     `CREATE TABLE IF NOT EXISTS steps_day (
-       day date PRIMARY KEY,
-       steps integer NOT NULL
-     )`,
+       day Date,
+       steps Int32
+     ) ENGINE = ReplacingMergeTree ORDER BY day`,
   ],
 
-  connectors: [phoneExport],                 // add an `api` connector with sync() later
-
-  async seed(ctx) { /* insert realistic sample rows for demo mode */ },
+  connectors: [phoneExport],                     // add an `api` connector with sync() later
 
   // Widgets are the dashboard. Each returns data for a typed chart.
   widgets: [
     {
-      id: "total", title: "Steps this month", type: "metric", size: "sm",
+      id: "total", title: "Steps this month", type: "metric", size: "sm", featured: true,
       async query(ctx) {
-        const { rows } = await ctx.db.query(
-          "SELECT coalesce(sum(steps),0)::int AS v FROM steps_day WHERE day >= date_trunc('month', now())"
+        const rows = await ctx.db.query<{ v: number }>(
+          "SELECT toInt32(sum(steps)) AS v FROM steps_day FINAL WHERE day >= toStartOfMonth(today())"
         );
-        return { value: rows[0].v, unit: "steps" };
+        return { value: rows[0]?.v ?? 0, unit: "steps" };
       },
     },
     {
       id: "daily", title: "Daily steps", type: "bar", size: "lg",
       async query(ctx) {
-        const { rows } = await ctx.db.query(
-          "SELECT to_char(day,'Mon DD') AS label, steps AS value FROM steps_day ORDER BY day DESC LIMIT 30"
+        const rows = await ctx.db.query(
+          "SELECT formatDateTime(day, '%b %d') AS label, steps AS value FROM steps_day FINAL ORDER BY day DESC LIMIT 30"
         );
         return { series: rows.reverse() };
       },
@@ -193,34 +229,42 @@ const steps: LifeStackModule = {
 export default steps;
 ```
 
-Then add it to `backend/src/modules/index.ts`:
+`ctx.db` is ClickHouse-oriented: `query(sql, params?)` returns an array of rows,
+`insert(table, rows)` appends a batch, and `command(sql)` runs DDL. Then add the module to
+`backend/src/modules/index.ts`:
 
 ```ts
 import steps from "./steps";
-export const modules = [movies, finance, energy, fuel, mobility, steps];
+export const modules = [watching, finance, energy, fuel, mobility, steps];
 ```
 
-Restart the backend. The module appears in Settings, ready to enable. Widget `type`s map to
-bespoke chart components on the frontend: `metric`, `bar`, `line`, `donut`, `calendar`,
-`list`, `table`.
+Restart the backend. The module appears in Settings, ready to enable, and the assistant can
+immediately query its tables. Widget `type`s map to bespoke chart components on the
+frontend: `metric`, `bar`, `line`, `donut`, `calendar`, `list`, `table`.
 
 ## Configuration
 
 All configuration is environment variables (see `.env.example`):
 
-| Variable          | Default                          | Purpose |
-|-------------------|----------------------------------|---------|
-| `SEED_DEMO`       | `true`                           | Seed demo data on first boot |
-| `DATABASE_URL`    | `postgres://lifestack:...`       | Postgres connection |
-| `BACKEND_PORT`    | `4000`                           | Backend API port |
-| `FRONTEND_PORT`   | `3000`                           | Frontend port |
-| `BACKEND_URL`     | `http://backend:4000`            | Internal URL frontend uses |
-| `ORIGIN`          | `http://localhost:3000`          | Public origin (CSRF) |
-| `TRAKT_*`         | empty                            | Movies module: Trakt connector credentials |
-| `TIBBER_TOKEN`    | empty                            | Energy module: Tibber connector token |
+| Variable             | Default                     | Purpose |
+|----------------------|-----------------------------|---------|
+| `CLICKHOUSE_DB`      | `lifestack`                 | Database name |
+| `CLICKHOUSE_USER`    | `lifestack`                 | Database user |
+| `CLICKHOUSE_PASSWORD`| `lifestack`                 | Database password |
+| `CLICKHOUSE_HTTP_PORT`| `8123`                     | ClickHouse HTTP port (host) |
+| `CLICKHOUSE_URL`     | `http://clickhouse:8123`    | Internal URL the backend uses |
+| `AI_BASE_URL`        | empty                       | OpenAI-compatible base URL for the assistant |
+| `AI_MODEL`           | empty                       | Model name (e.g. `gpt-4o-mini`, `llama3.1`) |
+| `AI_API_KEY`         | empty                       | API key (optional for local models) |
+| `BACKEND_PORT`       | `4000`                      | Backend API port |
+| `FRONTEND_PORT`      | `3000`                      | Frontend port |
+| `BACKEND_URL`        | `http://backend:4000`       | Internal URL frontend uses |
+| `ORIGIN`             | `http://localhost:3000`     | Public origin (CSRF) |
+| `TRAKT_CLIENT_ID` / `TRAKT_ACCESS_TOKEN` | empty   | Movies & TV: Trakt connector credentials |
+| `TIBBER_TOKEN`       | empty                       | Energy: Tibber connector token |
 
-Connector secrets can also be set at runtime in the Settings UI, which persists them in
-Postgres (env values are the fallback default).
+The assistant and connector secrets can also be set at runtime in the Settings UI, which
+persists them in ClickHouse (env values are the fallback default).
 
 ## Project structure
 
@@ -230,14 +274,14 @@ LifeStack/
 ├─ .env.example
 ├─ backend/                  Fastify aggregator + module system
 │  └─ src/
-│     ├─ core/               types · db · registry · scheduler · routes · seed
-│     └─ modules/            movies · finance · energy · fuel · mobility
+│     ├─ core/               types · db · registry · scheduler · routes · ai
+│     └─ modules/            watching · finance · energy · fuel · mobility
 │                            (each module owns connectors + widgets)
-├─ frontend/                 SvelteKit dashboard
+├─ frontend/                 SvelteKit dashboard + assistant
 │  └─ src/
 │     ├─ app.css             OKLCH design tokens
 │     ├─ lib/components/     bespoke SVG charts + widgets
-│     └─ routes/             overview · module pages · settings · api proxy
+│     └─ routes/             assistant · overview · module pages · settings · api proxy
 ├─ PRODUCT.md / DESIGN.md    design context & visual system
 └─ README.md
 ```
@@ -245,21 +289,24 @@ LifeStack/
 ## Local development (without Docker)
 
 ```bash
-# 1. Postgres (any local instance, or just the compose one)
-docker compose up -d postgres
+# 1. ClickHouse (just the compose one)
+docker compose up -d clickhouse
 
 # 2. Backend
-cd backend && npm install && npm run dev      # http://localhost:4000
+cd backend && npm install
+CLICKHOUSE_URL=http://localhost:8123 npm run dev      # http://localhost:4000
 
 # 3. Frontend
-cd frontend && npm install && npm run dev     # http://localhost:5173
+cd frontend && npm install && npm run dev             # http://localhost:5173
 ```
 
-Set `DATABASE_URL` and `BACKEND_URL` in your shell to point at the local services.
+Set `BACKEND_URL` in the frontend's shell to point at the local backend.
 
 ## Roadmap
 
-- [ ] OAuth helper flow for API modules (Trakt, Strava, etc.)
+- [ ] More watching connectors: Letterboxd, Plex, Jellyfin
+- [ ] OAuth helper flow for API connectors (Trakt, Strava, etc.)
+- [ ] Finance and mobility API connectors (GoCardless, Strava, ride apps)
 - [ ] Cross-module "year in review" overview
 - [ ] Module marketplace / external module loading
 - [ ] Per-widget date-range controls

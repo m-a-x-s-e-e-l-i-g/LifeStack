@@ -11,13 +11,12 @@
     "build": "tsc --noEmit"
   },
   "dependencies": {
+    "@clickhouse/client": "^1.7.0",
     "@fastify/cors": "^10.0.1",
-    "fastify": "^5.1.0",
-    "pg": "^8.13.1"
+    "fastify": "^5.1.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
-    "@types/pg": "^8.11.10",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2"
   }

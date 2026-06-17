@@ -1,5 +1,3 @@
-import type { QueryResult, QueryResultRow } from "pg";
-
 export interface Logger {
   debug: (msg: string, ...args: unknown[]) => void;
   info: (msg: string, ...args: unknown[]) => void;
@@ -7,14 +5,20 @@ export interface Logger {
   error: (msg: string, ...args: unknown[]) => void;
 }
 
+/**
+ * Database surface handed to modules. ClickHouse oriented: `query` returns rows
+ * directly, `insert` appends a batch (JSONEachRow), `command` runs DDL.
+ */
 export interface ModuleDb {
-  query<T extends QueryResultRow = any>(
+  query<T = Record<string, unknown>>(
     sql: string,
-    params?: unknown[],
-  ): Promise<QueryResult<T>>;
+    params?: Record<string, unknown>,
+  ): Promise<T[]>;
+  insert(table: string, rows: Record<string, unknown>[]): Promise<void>;
+  command(sql: string): Promise<void>;
 }
 
-/** Context handed to widget queries and module seed. `config` is reserved module config. */
+/** Context handed to widget queries. `config` is reserved module config. */
 export interface ModuleContext {
   db: ModuleDb;
   config: Record<string, unknown>;
@@ -74,6 +78,8 @@ export interface Connector {
   name: string;
   description: string;
   kind: "api" | "import" | "manual";
+  /** Optional inline SVG brand mark (uses currentColor where possible). */
+  icon?: string;
   configSchema?: ConfigField[];
   syncIntervalMinutes?: number;
   sync?: (ctx: ConnectorContext) => Promise<SyncResult>;
@@ -91,7 +97,5 @@ export interface LifeStackModule {
   accent: string;
   migrations: string[];
   connectors: Connector[];
-  /** Insert realistic synthetic data for demo mode. */
-  seed?: (ctx: ModuleContext) => Promise<void>;
   widgets: Widget[];
 }

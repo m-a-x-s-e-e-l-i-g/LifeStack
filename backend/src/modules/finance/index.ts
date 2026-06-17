@@ -1,53 +1,23 @@
-import type { Connector, LifeStackModule, ModuleContext } from "../../core/types";
-import { alreadySeeded, daysAgo, insertMany, iso, pick, rand, randInt, round2 } from "../_demo";
+import type { Connector, LifeStackModule } from "../../core/types";
 
-const EXPENSES: [string, string, number, number][] = [
-  ["Groceries", "Supermarket", 8, 65],
-  ["Dining", "Restaurant", 12, 55],
-  ["Transport", "Transit / parking", 3, 28],
-  ["Entertainment", "Streaming & cinema", 6, 30],
-  ["Shopping", "Online order", 12, 140],
-  ["Health", "Pharmacy", 5, 45],
-  ["Coffee", "Cafe", 3, 9],
-];
-
-const COLUMNS = ["day", "description", "category", "amount"];
-
-async function seed(ctx: ModuleContext): Promise<void> {
-  if (await alreadySeeded(ctx, "finance_tx")) return;
-  const rows: unknown[][] = [];
-  for (let i = 280; i >= 0; i--) {
-    const d = daysAgo(i);
-    if (d.getDate() === 1) {
-      rows.push([iso(d), "Monthly salary", "Income", round2(2800 + rand(-120, 240))]);
-      rows.push([iso(d), "Apartment rent", "Rent", -1250]);
-    }
-    if (d.getDate() === 5)
-      rows.push([iso(d), "Electricity & water", "Utilities", -round2(rand(80, 165))]);
-    const n = randInt(0, 3);
-    for (let k = 0; k < n; k++) {
-      const [category, description, lo, hi] = pick(EXPENSES);
-      rows.push([iso(d), description, category, -round2(rand(lo, hi))]);
-    }
-  }
-  await insertMany(ctx, "finance_tx", COLUMNS, rows);
-}
+const round2 = (n: number): number => Math.round(n * 100) / 100;
 
 const csv: Connector = {
   id: "csv",
   name: "CSV / JSON import",
-  description: "Import a bank export. Rows: {day, description, category, amount} (negative = expense).",
+  description:
+    "Import a bank export. Rows: {day, description, category, amount} (negative = expense).",
   kind: "import",
   async import(ctx, rows) {
     const values = rows
       .filter((r): r is Record<string, unknown> => typeof r === "object" && r !== null)
-      .map((r) => [
-        String(r.day ?? r.date ?? iso(new Date())).slice(0, 10),
-        String(r.description ?? "Imported"),
-        String(r.category ?? "Uncategorized"),
-        Number(r.amount ?? 0),
-      ]);
-    await insertMany(ctx, "finance_tx", COLUMNS, values);
+      .map((r) => ({
+        day: String(r.day ?? r.date ?? new Date().toISOString()).slice(0, 10),
+        description: String(r.description ?? "Imported"),
+        category: String(r.category ?? "Uncategorized"),
+        amount: Number(r.amount ?? 0),
+      }));
+    await ctx.db.insert("finance_tx", values);
     return { inserted: values.length };
   },
 };
@@ -60,16 +30,13 @@ const finance: LifeStackModule = {
   accent: "oklch(0.74 0.15 155)",
   migrations: [
     `CREATE TABLE IF NOT EXISTS finance_tx (
-       id serial PRIMARY KEY,
-       day date NOT NULL,
-       description text NOT NULL,
-       category text NOT NULL,
-       amount numeric NOT NULL
-     )`,
-    `CREATE INDEX IF NOT EXISTS finance_tx_day_idx ON finance_tx (day)`,
+       day Date,
+       description String,
+       category String,
+       amount Float64
+     ) ENGINE = MergeTree ORDER BY day`,
   ],
   connectors: [csv],
-  seed,
   widgets: [
     {
       id: "net-month",
@@ -78,16 +45,17 @@ const finance: LifeStackModule = {
       size: "sm",
       featured: true,
       async query(ctx) {
-        const { rows } = await ctx.db.query<{ cur: number; prev: number }>(
+        const rows = await ctx.db.query<{ cur: number; prev: number }>(
           `SELECT
-             coalesce(sum(amount) FILTER (WHERE day >= date_trunc('month', now())), 0) AS cur,
-             coalesce(sum(amount) FILTER (WHERE day >= date_trunc('month', now()) - interval '1 month'
-                                            AND day < date_trunc('month', now())), 0) AS prev
+             round(sumIf(amount, day >= toStartOfMonth(today())), 2) AS cur,
+             round(sumIf(amount, day >= toStartOfMonth(today()) - INTERVAL 1 MONTH
+                                 AND day < toStartOfMonth(today())), 2) AS prev
            FROM finance_tx`,
         );
-        const { cur, prev } = rows[0];
+        const cur = rows[0]?.cur ?? 0;
+        const prev = rows[0]?.prev ?? 0;
         return {
-          value: round2(cur),
+          value: cur,
           format: "currency",
           delta: round2(cur - prev),
           deltaLabel: "vs last month",
@@ -101,11 +69,11 @@ const finance: LifeStackModule = {
       size: "sm",
       featured: true,
       async query(ctx) {
-        const { rows } = await ctx.db.query<{ v: number }>(
-          `SELECT coalesce(-sum(amount) FILTER (WHERE amount < 0 AND day >= date_trunc('month', now())), 0) AS v
+        const rows = await ctx.db.query<{ v: number }>(
+          `SELECT round(-sumIf(amount, amount < 0 AND day >= toStartOfMonth(today())), 2) AS v
            FROM finance_tx`,
         );
-        return { value: round2(rows[0].v), format: "currency" };
+        return { value: rows[0]?.v ?? 0, format: "currency" };
       },
     },
     {
@@ -116,9 +84,9 @@ const finance: LifeStackModule = {
       size: "md",
       featured: true,
       async query(ctx) {
-        const { rows } = await ctx.db.query(
-          `SELECT category AS label, round((-sum(amount))::numeric, 2) AS value
-           FROM finance_tx WHERE amount < 0 AND day >= now() - interval '90 days'
+        const rows = await ctx.db.query(
+          `SELECT category AS label, round(-sum(amount), 2) AS value
+           FROM finance_tx WHERE amount < 0 AND day >= today() - INTERVAL 90 DAY
            GROUP BY category ORDER BY value DESC`,
         );
         return { slices: rows, format: "currency" };
@@ -131,10 +99,11 @@ const finance: LifeStackModule = {
       type: "bar",
       size: "lg",
       async query(ctx) {
-        const { rows } = await ctx.db.query(
-          `SELECT to_char(date_trunc('month', day), 'Mon') AS label, round(sum(amount)::numeric, 2) AS value
-           FROM finance_tx WHERE day >= date_trunc('month', now()) - interval '11 months'
-           GROUP BY date_trunc('month', day) ORDER BY date_trunc('month', day)`,
+        const rows = await ctx.db.query(
+          `SELECT formatDateTime(m, '%b') AS label, round(s, 2) AS value
+           FROM (SELECT toStartOfMonth(day) AS m, sum(amount) AS s FROM finance_tx
+                 WHERE day >= toStartOfMonth(today()) - INTERVAL 11 MONTH GROUP BY m)
+           ORDER BY m`,
         );
         return { series: rows, format: "currency", signed: true };
       },
@@ -145,9 +114,10 @@ const finance: LifeStackModule = {
       type: "line",
       size: "lg",
       async query(ctx) {
-        const { rows } = await ctx.db.query(
+        const rows = await ctx.db.query(
           `WITH daily AS (SELECT day, sum(amount) AS s FROM finance_tx GROUP BY day)
-           SELECT to_char(day, 'Mon DD') AS label, round((sum(s) OVER (ORDER BY day))::numeric, 2) AS value
+           SELECT formatDateTime(day, '%b %d') AS label,
+                  round(sum(s) OVER (ORDER BY day ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW), 2) AS value
            FROM daily ORDER BY day`,
         );
         return { series: rows, format: "currency" };
@@ -159,8 +129,8 @@ const finance: LifeStackModule = {
       type: "list",
       size: "md",
       async query(ctx) {
-        const { rows } = await ctx.db.query(
-          `SELECT category AS label, round((-sum(amount))::numeric, 2) AS value
+        const rows = await ctx.db.query(
+          `SELECT category AS label, round(-sum(amount), 2) AS value
            FROM finance_tx WHERE amount < 0 GROUP BY category ORDER BY value DESC LIMIT 6`,
         );
         return { items: rows, format: "currency" };
@@ -172,9 +142,9 @@ const finance: LifeStackModule = {
       type: "table",
       size: "lg",
       async query(ctx) {
-        const { rows } = await ctx.db.query(
-          `SELECT to_char(day, 'YYYY-MM-DD') AS date, description, category, round(amount::numeric, 2) AS amount
-           FROM finance_tx ORDER BY day DESC, id DESC LIMIT 12`,
+        const rows = await ctx.db.query(
+          `SELECT toString(day) AS date, description, category, round(amount, 2) AS amount
+           FROM finance_tx ORDER BY day DESC LIMIT 12`,
         );
         return {
           columns: [

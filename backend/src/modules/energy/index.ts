@@ -1,20 +1,6 @@
-import type { Connector, LifeStackModule, ModuleContext } from "../../core/types";
-import { alreadySeeded, daysAgo, insertMany, iso, rand, round2, seasonal } from "../_demo";
+import type { Connector, LifeStackModule } from "../../core/types";
 
-const COLUMNS = ["day", "day_kwh", "night_kwh", "cost"];
-
-async function seed(ctx: ModuleContext): Promise<void> {
-  if (await alreadySeeded(ctx, "energy_reading")) return;
-  const rows: unknown[][] = [];
-  for (let i = 288; i >= 0; i--) {
-    const d = daysAgo(i);
-    const base = rand(8, 14) * seasonal(d);
-    const dayKwh = round2(base * rand(0.5, 0.65));
-    const nightKwh = round2(base * rand(0.35, 0.5));
-    rows.push([iso(d), dayKwh, nightKwh, round2(dayKwh * 0.3 + nightKwh * 0.21)]);
-  }
-  await insertMany(ctx, "energy_reading", COLUMNS, rows);
-}
+const round2 = (n: number): number => Math.round(n * 100) / 100;
 
 const tibber: Connector = {
   id: "tibber",
@@ -43,22 +29,29 @@ const tibber: Connector = {
     });
     if (!res.ok) throw new Error(`Tibber API error ${res.status}`);
     const json = (await res.json()) as {
-      data?: { viewer?: { homes?: Array<{ consumption?: { nodes?: Array<{ from: string; consumption: number | null; cost: number | null }> } }> } };
+      data?: {
+        viewer?: {
+          homes?: Array<{
+            consumption?: { nodes?: Array<{ from: string; consumption: number | null; cost: number | null }> };
+          }>;
+        };
+      };
     };
     const homes = json.data?.viewer?.homes ?? [];
-    let inserted = 0;
+    const rows: Record<string, unknown>[] = [];
     for (const home of homes) {
       for (const n of home.consumption?.nodes ?? []) {
         if (n.consumption == null) continue;
-        const r = await ctx.db.query(
-          `INSERT INTO energy_reading (day, day_kwh, night_kwh, cost) VALUES ($1, $2, 0, $3)
-           ON CONFLICT (day) DO UPDATE SET day_kwh = EXCLUDED.day_kwh, cost = EXCLUDED.cost`,
-          [String(n.from).slice(0, 10), Number(n.consumption), Number(n.cost ?? 0)],
-        );
-        inserted += r.rowCount ?? 0;
+        rows.push({
+          day: String(n.from).slice(0, 10),
+          day_kwh: Number(n.consumption),
+          night_kwh: 0,
+          cost: Number(n.cost ?? 0),
+        });
       }
     }
-    return { inserted, message: `synced ${inserted} day(s) from Tibber` };
+    await ctx.db.insert("energy_reading", rows);
+    return { inserted: rows.length, message: `synced ${rows.length} day(s) from Tibber` };
   },
 };
 
@@ -73,14 +66,14 @@ const csv: Connector = {
       .map((r) => {
         const dayKwh = Number(r.day_kwh ?? r.dayKwh ?? r.kwh ?? 0);
         const nightKwh = Number(r.night_kwh ?? r.nightKwh ?? 0);
-        return [
-          String(r.day ?? r.date ?? iso(new Date())).slice(0, 10),
-          dayKwh,
-          nightKwh,
-          Number(r.cost ?? round2(dayKwh * 0.3 + nightKwh * 0.21)),
-        ];
+        return {
+          day: String(r.day ?? r.date ?? new Date().toISOString()).slice(0, 10),
+          day_kwh: dayKwh,
+          night_kwh: nightKwh,
+          cost: Number(r.cost ?? round2(dayKwh * 0.3 + nightKwh * 0.21)),
+        };
       });
-    await insertMany(ctx, "energy_reading", COLUMNS, values);
+    await ctx.db.insert("energy_reading", values);
     return { inserted: values.length };
   },
 };
@@ -93,15 +86,13 @@ const energy: LifeStackModule = {
   accent: "oklch(0.80 0.15 100)",
   migrations: [
     `CREATE TABLE IF NOT EXISTS energy_reading (
-       id serial PRIMARY KEY,
-       day date NOT NULL UNIQUE,
-       day_kwh numeric NOT NULL,
-       night_kwh numeric NOT NULL,
-       cost numeric NOT NULL
-     )`,
+       day Date,
+       day_kwh Float64,
+       night_kwh Float64,
+       cost Float64
+     ) ENGINE = ReplacingMergeTree ORDER BY day`,
   ],
   connectors: [tibber, csv],
-  seed,
   widgets: [
     {
       id: "kwh-month",
@@ -110,11 +101,11 @@ const energy: LifeStackModule = {
       size: "sm",
       featured: true,
       async query(ctx) {
-        const { rows } = await ctx.db.query<{ v: number }>(
-          `SELECT round(coalesce(sum(day_kwh + night_kwh), 0)::numeric, 1) AS v
-           FROM energy_reading WHERE day >= date_trunc('month', now())`,
+        const rows = await ctx.db.query<{ v: number }>(
+          `SELECT round(sum(day_kwh + night_kwh), 1) AS v
+           FROM energy_reading FINAL WHERE day >= toStartOfMonth(today())`,
         );
-        return { value: rows[0].v, unit: "kWh" };
+        return { value: rows[0]?.v ?? 0, unit: "kWh" };
       },
     },
     {
@@ -124,10 +115,11 @@ const energy: LifeStackModule = {
       size: "sm",
       featured: true,
       async query(ctx) {
-        const { rows } = await ctx.db.query<{ v: number }>(
-          `SELECT coalesce(sum(cost), 0) AS v FROM energy_reading WHERE day >= date_trunc('month', now())`,
+        const rows = await ctx.db.query<{ v: number }>(
+          `SELECT round(sum(cost), 2) AS v
+           FROM energy_reading FINAL WHERE day >= toStartOfMonth(today())`,
         );
-        return { value: round2(rows[0].v), format: "currency" };
+        return { value: rows[0]?.v ?? 0, format: "currency" };
       },
     },
     {
@@ -137,11 +129,11 @@ const energy: LifeStackModule = {
       type: "metric",
       size: "sm",
       async query(ctx) {
-        const { rows } = await ctx.db.query<{ v: number }>(
-          `SELECT round(coalesce(avg(day_kwh + night_kwh), 0)::numeric, 1) AS v
-           FROM energy_reading WHERE day >= now() - interval '30 days'`,
+        const rows = await ctx.db.query<{ v: number }>(
+          `SELECT if(count() = 0, 0, round(avg(day_kwh + night_kwh), 1)) AS v
+           FROM energy_reading FINAL WHERE day >= today() - INTERVAL 30 DAY`,
         );
-        return { value: rows[0].v, unit: "kWh/day" };
+        return { value: rows[0]?.v ?? 0, unit: "kWh/day" };
       },
     },
     {
@@ -151,14 +143,14 @@ const energy: LifeStackModule = {
       type: "donut",
       size: "md",
       async query(ctx) {
-        const { rows } = await ctx.db.query<{ d: number; n: number }>(
-          `SELECT round(coalesce(sum(day_kwh), 0)::numeric, 1) AS d, round(coalesce(sum(night_kwh), 0)::numeric, 1) AS n
-           FROM energy_reading WHERE day >= now() - interval '90 days'`,
+        const rows = await ctx.db.query<{ d: number; n: number }>(
+          `SELECT round(sum(day_kwh), 1) AS d, round(sum(night_kwh), 1) AS n
+           FROM energy_reading FINAL WHERE day >= today() - INTERVAL 90 DAY`,
         );
         return {
           slices: [
-            { label: "Day", value: rows[0].d },
-            { label: "Night", value: rows[0].n },
+            { label: "Day", value: rows[0]?.d ?? 0 },
+            { label: "Night", value: rows[0]?.n ?? 0 },
           ],
           unit: "kWh",
         };
@@ -170,9 +162,10 @@ const energy: LifeStackModule = {
       type: "bar",
       size: "lg",
       async query(ctx) {
-        const { rows } = await ctx.db.query(
-          `SELECT to_char(date_trunc('month', day), 'Mon') AS label, round(sum(day_kwh + night_kwh)::numeric, 0) AS value
-           FROM energy_reading GROUP BY date_trunc('month', day) ORDER BY date_trunc('month', day)`,
+        const rows = await ctx.db.query(
+          `SELECT formatDateTime(m, '%b') AS label, round(s, 0) AS value
+           FROM (SELECT toStartOfMonth(day) AS m, sum(day_kwh + night_kwh) AS s
+                 FROM energy_reading FINAL GROUP BY m) ORDER BY m`,
         );
         return { series: rows, unit: "kWh" };
       },
@@ -185,9 +178,9 @@ const energy: LifeStackModule = {
       size: "lg",
       featured: true,
       async query(ctx) {
-        const { rows } = await ctx.db.query(
-          `SELECT to_char(day, 'YYYY-MM-DD') AS date, round((day_kwh + night_kwh)::numeric, 1) AS value
-           FROM energy_reading WHERE day >= now() - interval '180 days' ORDER BY day`,
+        const rows = await ctx.db.query(
+          `SELECT toString(day) AS date, round(day_kwh + night_kwh, 1) AS value
+           FROM energy_reading FINAL WHERE day >= today() - INTERVAL 180 DAY ORDER BY day`,
         );
         return { days: rows, unit: "kWh" };
       },
@@ -198,9 +191,10 @@ const energy: LifeStackModule = {
       type: "line",
       size: "md",
       async query(ctx) {
-        const { rows } = await ctx.db.query(
-          `SELECT to_char(date_trunc('month', day), 'Mon') AS label, round(sum(cost)::numeric, 2) AS value
-           FROM energy_reading GROUP BY date_trunc('month', day) ORDER BY date_trunc('month', day)`,
+        const rows = await ctx.db.query(
+          `SELECT formatDateTime(m, '%b') AS label, round(s, 2) AS value
+           FROM (SELECT toStartOfMonth(day) AS m, sum(cost) AS s
+                 FROM energy_reading FINAL GROUP BY m) ORDER BY m`,
         );
         return { series: rows, format: "currency" };
       },

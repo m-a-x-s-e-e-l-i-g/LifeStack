@@ -1,12 +1,12 @@
 import type { PageServerLoad } from "./$types";
 import { backendJson } from "$lib/server/backend";
-import type { OverviewData } from "$lib/types";
+import type { AiStatus } from "$lib/types";
 
 export const load: PageServerLoad = async () => {
   try {
-    const overview = await backendJson<OverviewData>("/api/overview");
-    return { overview, ok: true };
+    const ai = await backendJson<AiStatus>("/api/ai/status");
+    return { ai };
   } catch {
-    return { overview: { modules: [], featured: [] } as OverviewData, ok: false };
+    return { ai: { configured: false, model: null, baseUrl: null, hasKey: false } as AiStatus };
   }
 };

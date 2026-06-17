@@ -8,6 +8,10 @@
 
   let busyModule = $state<string | null>(null);
 
+  let ai = $state({ baseUrl: "", model: "", apiKey: "" });
+  let aiBusy = $state(false);
+  let aiStatusMsg = $state<string | null>(null);
+
   async function toggleModule(id: string, enabled: boolean) {
     busyModule = id;
     try {
@@ -15,6 +19,25 @@
       await invalidateAll();
     } finally {
       busyModule = null;
+    }
+  }
+
+  async function saveAi() {
+    aiBusy = true;
+    aiStatusMsg = "Saving…";
+    try {
+      const patch: Record<string, string> = {};
+      if (ai.baseUrl.trim()) patch.baseUrl = ai.baseUrl.trim();
+      if (ai.model.trim()) patch.model = ai.model.trim();
+      if (ai.apiKey) patch.apiKey = ai.apiKey;
+      await action("/ai/config", "PUT", patch);
+      ai.apiKey = "";
+      await invalidateAll();
+      aiStatusMsg = "Saved";
+    } catch (e) {
+      aiStatusMsg = e instanceof Error ? e.message : "Failed";
+    } finally {
+      aiBusy = false;
     }
   }
 </script>
@@ -29,6 +52,58 @@
     manual connectors accept imports. Enable what you use, wire up credentials, and trigger a sync.
   </p>
 </header>
+
+<section class="assistant" id="assistant" style="--accent: var(--brand)">
+  <div class="ahead">
+    <div class="aident">
+      <span class="abadge">✦</span>
+      <div>
+        <div class="aname">
+          <h2>Assistant</h2>
+          <span class="state" class:on={data.ai.configured}>
+            {data.ai.configured ? "Connected" : "Not connected"}
+          </span>
+        </div>
+        <p class="adesc">
+          Connect any OpenAI-compatible endpoint. LifeStack passes your table schema and runs the
+          model's read-only SQL against ClickHouse. Nothing is written back.
+        </p>
+      </div>
+    </div>
+  </div>
+
+  <div class="afields">
+    <label class="field">
+      <span class="flabel">Base URL</span>
+      <input
+        type="text"
+        bind:value={ai.baseUrl}
+        placeholder={data.ai.baseUrl || "https://api.openai.com/v1"}
+        autocomplete="off"
+      />
+      <span class="help">For a local Ollama, use http://host.docker.internal:11434/v1</span>
+    </label>
+    <label class="field">
+      <span class="flabel">Model</span>
+      <input type="text" bind:value={ai.model} placeholder={data.ai.model || "gpt-4o-mini, llama3.1, qwen2.5 …"} autocomplete="off" />
+    </label>
+    <label class="field">
+      <span class="flabel">API key</span>
+      <input
+        type="password"
+        bind:value={ai.apiKey}
+        placeholder={data.ai.hasKey ? "•••••••• (set)" : "optional for local models"}
+        autocomplete="off"
+      />
+    </label>
+  </div>
+
+  <div class="arow">
+    <button class="btn btn--primary" onclick={saveAi} disabled={aiBusy}>Save assistant</button>
+    {#if aiStatusMsg}<span class="astatus">{aiStatusMsg}</span>{/if}
+    {#if data.ai.configured}<span class="ameta">{data.ai.baseUrl} · {data.ai.model}</span>{/if}
+  </div>
+</section>
 
 <div class="modules">
   {#each data.modules as m (m.id)}
@@ -80,6 +155,112 @@
     color: var(--text-dim);
     max-width: 70ch;
     margin: 0;
+  }
+
+  .assistant {
+    background: var(--surface);
+    border: 1px solid color-mix(in oklab, var(--accent) 22%, var(--border));
+    border-radius: var(--r-lg);
+    padding: var(--s5);
+    margin-bottom: var(--s5);
+  }
+  .ahead {
+    margin-bottom: var(--s4);
+  }
+  .aident {
+    display: flex;
+    gap: var(--s4);
+    align-items: flex-start;
+  }
+  .abadge {
+    display: grid;
+    place-items: center;
+    width: 46px;
+    height: 46px;
+    flex: none;
+    border-radius: var(--r);
+    font-size: 20px;
+    color: var(--accent);
+    background: color-mix(in oklab, var(--accent) 16%, var(--surface-2));
+    border: 1px solid color-mix(in oklab, var(--accent) 28%, var(--border));
+  }
+  .aname {
+    display: flex;
+    align-items: center;
+    gap: var(--s3);
+  }
+  .aname h2 {
+    font-size: 1.2rem;
+    letter-spacing: -0.02em;
+  }
+  .state {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--text-faint);
+    border: 1px solid var(--border);
+    border-radius: 99px;
+    padding: 2px 9px;
+  }
+  .state.on {
+    color: var(--pos);
+    border-color: color-mix(in oklab, var(--pos) 40%, var(--border));
+  }
+  .adesc {
+    margin: 4px 0 0;
+    font-size: 13px;
+    color: var(--text-dim);
+    max-width: 66ch;
+  }
+  .afields {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: var(--s4);
+    margin-bottom: var(--s4);
+  }
+  .field {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .flabel {
+    font-size: 12px;
+    color: var(--text-dim);
+    font-weight: 500;
+  }
+  .field input {
+    background: var(--bg-sunken);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--r-sm);
+    padding: 9px 11px;
+    color: var(--text);
+    font: inherit;
+    font-size: 13.5px;
+  }
+  .field input:focus-visible {
+    border-color: var(--accent);
+    outline: none;
+  }
+  .help {
+    font-size: 11.5px;
+    color: var(--text-faint);
+  }
+  .arow {
+    display: flex;
+    align-items: center;
+    gap: var(--s3);
+    flex-wrap: wrap;
+  }
+  .astatus {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--accent);
+  }
+  .ameta {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--text-faint);
   }
 
   .modules {

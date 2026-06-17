@@ -1,76 +1,122 @@
-import pg from "pg";
 import { createHash } from "node:crypto";
+import { createClient, type ClickHouseClient } from "@clickhouse/client";
 import { env } from "./env";
 import { logger } from "./logger";
 
-const { Pool } = pg;
+/**
+ * ClickHouse data layer. ClickHouse has no UPSERT, so mutable state tables use
+ * ReplacingMergeTree (read with FINAL to collapse to the latest row) and the
+ * sync log is an append only event stream.
+ */
 
-// Keep bigint and numeric as JS numbers (safe for our magnitudes).
-pg.types.setTypeParser(20, (v) => parseInt(v, 10));
-pg.types.setTypeParser(1700, (v) => parseFloat(v));
+const settings = {
+  // Return 64 bit integers as JSON numbers, not strings.
+  output_format_json_quote_64bit_integers: 0 as const,
+  // Accept ISO 8601 timestamps on insert.
+  date_time_input_format: "best_effort" as const,
+};
 
-export const pool = new Pool({ connectionString: env.DATABASE_URL });
+export const client: ClickHouseClient = createClient({
+  url: env.CLICKHOUSE_URL,
+  username: env.CLICKHOUSE_USER,
+  password: env.CLICKHOUSE_PASSWORD,
+  database: env.CLICKHOUSE_DB,
+  clickhouse_settings: settings,
+  request_timeout: 60_000,
+});
 
-export function query<T extends pg.QueryResultRow = any>(
+/** Run a SELECT/WITH query and return rows as objects. */
+export async function query<T = Record<string, unknown>>(
   sql: string,
-  params?: unknown[],
-): Promise<pg.QueryResult<T>> {
-  return pool.query<T>(sql, params as any[]);
+  params?: Record<string, unknown>,
+): Promise<T[]> {
+  const rs = await client.query({
+    query: sql,
+    query_params: params,
+    format: "JSONEachRow",
+  });
+  return rs.json<T>();
 }
 
-export async function waitForDb(retries = 30, delayMs = 1000): Promise<void> {
+/** Run a DDL/utility statement that returns no rows. */
+export async function command(sql: string): Promise<void> {
+  await client.command({ query: sql, clickhouse_settings: settings });
+}
+
+/** Append rows to a table (JSONEachRow). No-op for an empty batch. */
+export async function insert(
+  table: string,
+  rows: Record<string, unknown>[],
+): Promise<void> {
+  if (rows.length === 0) return;
+  await client.insert({ table, values: rows, format: "JSONEachRow" });
+}
+
+export async function waitForDb(retries = 60, delayMs = 1000): Promise<void> {
+  // Bootstrap the database (the official image creates it from CLICKHOUSE_DB,
+  // but this also covers a bare ClickHouse instance).
+  const bootstrap = createClient({
+    url: env.CLICKHOUSE_URL,
+    username: env.CLICKHOUSE_USER,
+    password: env.CLICKHOUSE_PASSWORD,
+    clickhouse_settings: settings,
+  });
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
-      await pool.query("SELECT 1");
-      logger.info("database ready");
+      await bootstrap.command({
+        query: `CREATE DATABASE IF NOT EXISTS ${env.CLICKHOUSE_DB}`,
+      });
+      await bootstrap.close();
+      await query("SELECT 1");
+      logger.info("clickhouse ready");
       return;
     } catch {
-      logger.warn(`database not ready (attempt ${attempt}/${retries})`);
+      logger.warn(`clickhouse not ready (attempt ${attempt}/${retries})`);
       await new Promise((r) => setTimeout(r, delayMs));
     }
   }
-  throw new Error("database did not become ready in time");
+  throw new Error("clickhouse did not become ready in time");
 }
 
 export async function runCoreMigrations(): Promise<void> {
-  await query(`CREATE TABLE IF NOT EXISTS meta (
-      key text PRIMARY KEY,
-      value text NOT NULL
-    )`);
-  await query(`CREATE TABLE IF NOT EXISTS module_state (
-      id text PRIMARY KEY,
-      enabled boolean NOT NULL DEFAULT true,
-      installed_at timestamptz NOT NULL DEFAULT now(),
-      updated_at timestamptz NOT NULL DEFAULT now()
-    )`);
-  await query(`CREATE TABLE IF NOT EXISTS connector_state (
-      module_id text NOT NULL,
-      connector_id text NOT NULL,
-      enabled boolean NOT NULL DEFAULT false,
-      config jsonb NOT NULL DEFAULT '{}'::jsonb,
-      installed_at timestamptz NOT NULL DEFAULT now(),
-      updated_at timestamptz NOT NULL DEFAULT now(),
-      PRIMARY KEY (module_id, connector_id)
-    )`);
-  await query(`CREATE TABLE IF NOT EXISTS schema_migrations (
-      id serial PRIMARY KEY,
-      module_id text NOT NULL,
-      hash text NOT NULL UNIQUE,
-      applied_at timestamptz NOT NULL DEFAULT now()
-    )`);
-  await query(`CREATE TABLE IF NOT EXISTS sync_log (
-      id serial PRIMARY KEY,
-      module_id text NOT NULL,
-      connector_id text,
-      started_at timestamptz NOT NULL DEFAULT now(),
-      finished_at timestamptz,
-      status text NOT NULL DEFAULT 'running',
-      inserted integer NOT NULL DEFAULT 0,
-      message text
-    )`);
+  await command(`CREATE TABLE IF NOT EXISTS meta (
+      key String,
+      value String,
+      updated_at DateTime64(3) DEFAULT now64(3)
+    ) ENGINE = ReplacingMergeTree(updated_at) ORDER BY key`);
+
+  await command(`CREATE TABLE IF NOT EXISTS module_state (
+      id String,
+      enabled UInt8 DEFAULT 1,
+      updated_at DateTime64(3) DEFAULT now64(3)
+    ) ENGINE = ReplacingMergeTree(updated_at) ORDER BY id`);
+
+  await command(`CREATE TABLE IF NOT EXISTS connector_state (
+      module_id String,
+      connector_id String,
+      enabled UInt8 DEFAULT 0,
+      config String DEFAULT '{}',
+      updated_at DateTime64(3) DEFAULT now64(3)
+    ) ENGINE = ReplacingMergeTree(updated_at) ORDER BY (module_id, connector_id)`);
+
+  await command(`CREATE TABLE IF NOT EXISTS schema_migrations (
+      hash String,
+      module_id String,
+      applied_at DateTime DEFAULT now()
+    ) ENGINE = MergeTree ORDER BY hash`);
+
+  await command(`CREATE TABLE IF NOT EXISTS sync_log (
+      module_id String,
+      connector_id String,
+      status String,
+      started_at DateTime,
+      finished_at DateTime,
+      inserted Int64,
+      message String
+    ) ENGINE = MergeTree ORDER BY (module_id, finished_at)`);
 }
 
-/** Apply a module's migration statements idempotently, tracked by content hash. */
+/** Apply a module's DDL statements idempotently, tracked by content hash. */
 export async function applyModuleMigrations(
   moduleId: string,
   statements: string[],
@@ -79,30 +125,26 @@ export async function applyModuleMigrations(
   for (let i = 0; i < statements.length; i++) {
     const sql = statements[i];
     const hash = createHash("sha1").update(`${moduleId}:${i}:${sql}`).digest("hex");
-    const seen = await query("SELECT 1 FROM schema_migrations WHERE hash = $1", [hash]);
-    if (seen.rowCount) continue;
-    await query(sql);
-    await query(
-      "INSERT INTO schema_migrations (module_id, hash) VALUES ($1, $2) ON CONFLICT DO NOTHING",
-      [moduleId, hash],
+    const seen = await query<{ c: number }>(
+      "SELECT count() AS c FROM schema_migrations WHERE hash = {hash:String}",
+      { hash },
     );
+    if (seen[0]?.c > 0) continue;
+    await command(sql);
+    await insert("schema_migrations", [{ hash, module_id: moduleId }]);
     applied++;
   }
   return applied;
 }
 
 export async function getMeta(key: string): Promise<string | null> {
-  const { rows } = await query<{ value: string }>(
-    "SELECT value FROM meta WHERE key = $1",
-    [key],
+  const rows = await query<{ value: string }>(
+    "SELECT value FROM meta FINAL WHERE key = {key:String} LIMIT 1",
+    { key },
   );
   return rows[0]?.value ?? null;
 }
 
 export async function setMeta(key: string, value: string): Promise<void> {
-  await query(
-    `INSERT INTO meta (key, value) VALUES ($1, $2)
-     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
-    [key, value],
-  );
+  await insert("meta", [{ key, value, updated_at: new Date().toISOString() }]);
 }

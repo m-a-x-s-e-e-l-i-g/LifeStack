@@ -77,7 +77,7 @@
     <div class="connectors">
       {#each detail.connectors as c (c.id)}
         <a class="conn" class:on={c.enabled} href="/settings">
-          <span class="cdot"></span>
+          {#if c.icon}<span class="cicon">{@html c.icon}</span>{:else}<span class="cdot"></span>{/if}
           {c.name}
           <span class="kind">{c.kind}</span>
           {#if c.lastSync}<span class="cwhen">{relativeTime(c.lastSync)}</span>{/if}
@@ -89,7 +89,7 @@
   {#if !data.stats.enabled}
     <div class="disabled panel">
       <h2>This module is off</h2>
-      <p>Enable it to run its stats. Demo data is already seeded, so charts will appear immediately.</p>
+      <p>Enable it, then connect a source or import a file to populate its stats.</p>
       <button class="btn btn--primary" onclick={enable} disabled={busy}>Enable {m.name}</button>
     </div>
   {:else if !widgets.length}
@@ -178,6 +178,19 @@
     height: 7px;
     border-radius: 50%;
     background: var(--text-faint);
+  }
+  .cicon {
+    display: inline-flex;
+    width: 14px;
+    height: 14px;
+    color: var(--text-faint);
+  }
+  .cicon :global(svg) {
+    width: 100%;
+    height: 100%;
+  }
+  .conn.on .cicon {
+    color: var(--accent);
   }
   .conn.on .cdot {
     background: var(--accent);

@@ -1,4 +1,4 @@
-import { applyModuleMigrations, query } from "../db";
+import { applyModuleMigrations, command, insert, query } from "../db";
 import { logger } from "../logger";
 import { modules } from "../modules";
 import type {
@@ -10,6 +10,8 @@ import type {
 } from "./types";
 
 const byId = new Map<string, LifeStackModule>(modules.map((m) => [m.id, m]));
+
+const db = { query, insert, command };
 
 export function allModules(): LifeStackModule[] {
   return modules;
@@ -27,11 +29,11 @@ export function getConnector(
 }
 
 export async function isModuleEnabled(id: string): Promise<boolean> {
-  const { rows } = await query<{ enabled: boolean }>(
-    "SELECT enabled FROM module_state WHERE id = $1",
-    [id],
+  const rows = await query<{ enabled: number }>(
+    "SELECT enabled FROM module_state FINAL WHERE id = {id:String} LIMIT 1",
+    { id },
   );
-  return rows[0]?.enabled ?? true;
+  return (rows[0]?.enabled ?? 1) === 1;
 }
 
 interface ConnectorStateRow {
@@ -43,11 +45,20 @@ async function connectorState(
   moduleId: string,
   connectorId: string,
 ): Promise<ConnectorStateRow> {
-  const { rows } = await query<ConnectorStateRow>(
-    "SELECT enabled, config FROM connector_state WHERE module_id = $1 AND connector_id = $2",
-    [moduleId, connectorId],
+  const rows = await query<{ enabled: number; config: string }>(
+    `SELECT enabled, config FROM connector_state FINAL
+     WHERE module_id = {m:String} AND connector_id = {c:String} LIMIT 1`,
+    { m: moduleId, c: connectorId },
   );
-  return rows[0] ?? { enabled: false, config: {} };
+  const r = rows[0];
+  if (!r) return { enabled: false, config: {} };
+  let config: Record<string, unknown> = {};
+  try {
+    config = JSON.parse(r.config || "{}");
+  } catch {
+    config = {};
+  }
+  return { enabled: r.enabled === 1, config };
 }
 
 export async function isConnectorEnabled(
@@ -80,7 +91,7 @@ export async function resolveConnectorConfig(
 }
 
 export function buildModuleContext(m: LifeStackModule): ModuleContext {
-  return { db: { query }, config: {}, logger: logger.child(m.id), now: new Date() };
+  return { db, config: {}, logger: logger.child(m.id), now: new Date() };
 }
 
 export async function buildConnectorContext(
@@ -88,28 +99,42 @@ export async function buildConnectorContext(
   c: Connector,
 ): Promise<ModuleContext> {
   return {
-    db: { query },
+    db,
     config: await resolveConnectorConfig(m, c),
     logger: logger.child(`${m.id}:${c.id}`),
     now: new Date(),
   };
 }
 
+async function rowExists(sql: string, params: Record<string, unknown>): Promise<boolean> {
+  const rows = await query<{ c: number }>(sql, params);
+  return (rows[0]?.c ?? 0) > 0;
+}
+
 /** Ensure state rows exist and run migrations. Modules default enabled; api connectors
  *  default enabled only when their env credentials are present. */
 export async function initModules(): Promise<void> {
   for (const m of modules) {
-    await query(
-      "INSERT INTO module_state (id, enabled) VALUES ($1, true) ON CONFLICT (id) DO NOTHING",
-      [m.id],
-    );
+    if (
+      !(await rowExists(
+        "SELECT count() AS c FROM module_state FINAL WHERE id = {id:String}",
+        { id: m.id },
+      ))
+    ) {
+      await insert("module_state", [{ id: m.id, enabled: 1 }]);
+    }
     for (const c of m.connectors) {
-      const defaultEnabled = c.kind === "api" ? envSatisfied(c) : true;
-      await query(
-        `INSERT INTO connector_state (module_id, connector_id, enabled)
-         VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
-        [m.id, c.id, defaultEnabled],
+      const exists = await rowExists(
+        `SELECT count() AS c FROM connector_state FINAL
+         WHERE module_id = {m:String} AND connector_id = {c:String}`,
+        { m: m.id, c: c.id },
       );
+      if (!exists) {
+        const defaultEnabled = c.kind === "api" ? envSatisfied(c) : true;
+        await insert("connector_state", [
+          { module_id: m.id, connector_id: c.id, enabled: defaultEnabled ? 1 : 0, config: "{}" },
+        ]);
+      }
     }
     const applied = await applyModuleMigrations(m.id, m.migrations);
     if (applied > 0) logger.info(`module ${m.id}: applied ${applied} migration(s)`);
@@ -117,10 +142,9 @@ export async function initModules(): Promise<void> {
 }
 
 export async function setModuleEnabled(id: string, enabled: boolean): Promise<void> {
-  await query(
-    "UPDATE module_state SET enabled = $2, updated_at = now() WHERE id = $1",
-    [id, enabled],
-  );
+  await insert("module_state", [
+    { id, enabled: enabled ? 1 : 0, updated_at: new Date().toISOString() },
+  ]);
 }
 
 export async function setConnectorEnabled(
@@ -128,11 +152,16 @@ export async function setConnectorEnabled(
   connectorId: string,
   enabled: boolean,
 ): Promise<void> {
-  await query(
-    `UPDATE connector_state SET enabled = $3, updated_at = now()
-     WHERE module_id = $1 AND connector_id = $2`,
-    [moduleId, connectorId, enabled],
-  );
+  const { config } = await connectorState(moduleId, connectorId);
+  await insert("connector_state", [
+    {
+      module_id: moduleId,
+      connector_id: connectorId,
+      enabled: enabled ? 1 : 0,
+      config: JSON.stringify(config),
+      updated_at: new Date().toISOString(),
+    },
+  ]);
 }
 
 export async function setConnectorConfig(
@@ -140,28 +169,33 @@ export async function setConnectorConfig(
   connectorId: string,
   patch: Record<string, unknown>,
 ): Promise<void> {
-  const current = (await connectorState(moduleId, connectorId)).config;
-  const merged = { ...current, ...patch };
-  await query(
-    `UPDATE connector_state SET config = $3, updated_at = now()
-     WHERE module_id = $1 AND connector_id = $2`,
-    [moduleId, connectorId, JSON.stringify(merged)],
-  );
+  const { enabled, config } = await connectorState(moduleId, connectorId);
+  const merged = { ...config, ...patch };
+  await insert("connector_state", [
+    {
+      module_id: moduleId,
+      connector_id: connectorId,
+      enabled: enabled ? 1 : 0,
+      config: JSON.stringify(merged),
+      updated_at: new Date().toISOString(),
+    },
+  ]);
 }
 
 export async function lastSync(
   moduleId: string,
   connectorId?: string,
 ): Promise<{ at: string | null; status: string | null; message: string | null }> {
-  const { rows } = await query<{
-    finished_at: string | null;
-    status: string;
-    message: string | null;
-  }>(
-    `SELECT finished_at, status, message FROM sync_log
-     WHERE module_id = $1 AND ($2::text IS NULL OR connector_id = $2)
-     ORDER BY id DESC LIMIT 1`,
-    [moduleId, connectorId ?? null],
+  const params: Record<string, unknown> = { m: moduleId };
+  let filter = "module_id = {m:String}";
+  if (connectorId) {
+    filter += " AND connector_id = {c:String}";
+    params.c = connectorId;
+  }
+  const rows = await query<{ finished_at: string; status: string; message: string }>(
+    `SELECT formatDateTime(finished_at, '%Y-%m-%dT%H:%M:%SZ') AS finished_at, status, message
+     FROM sync_log WHERE ${filter} ORDER BY finished_at DESC LIMIT 1`,
+    params,
   );
   const r = rows[0];
   return {
@@ -171,32 +205,43 @@ export async function lastSync(
   };
 }
 
+async function recordSync(
+  moduleId: string,
+  connectorId: string,
+  status: string,
+  startedAt: Date,
+  inserted: number,
+  message: string | null,
+): Promise<void> {
+  await insert("sync_log", [
+    {
+      module_id: moduleId,
+      connector_id: connectorId,
+      status,
+      started_at: startedAt.toISOString(),
+      finished_at: new Date().toISOString(),
+      inserted,
+      message: message ?? "",
+    },
+  ]);
+}
+
 /** Run a connector's sync, recording a sync_log entry. */
 export async function runConnectorSync(
   m: LifeStackModule,
   c: Connector,
 ): Promise<SyncResult> {
   if (!c.sync) return { message: "connector has no sync" };
-  const { rows } = await query<{ id: number }>(
-    "INSERT INTO sync_log (module_id, connector_id, status) VALUES ($1, $2, 'running') RETURNING id",
-    [m.id, c.id],
-  );
-  const logId = rows[0].id;
+  const startedAt = new Date();
   try {
     const ctx = await buildConnectorContext(m, c);
     const result = await c.sync(ctx);
-    await query(
-      `UPDATE sync_log SET finished_at = now(), status = 'ok', inserted = $2, message = $3 WHERE id = $1`,
-      [logId, result.inserted ?? 0, result.message ?? null],
-    );
+    await recordSync(m.id, c.id, "ok", startedAt, result.inserted ?? 0, result.message ?? null);
     logger.child(`${m.id}:${c.id}`).info(`sync ok (${result.inserted ?? 0} inserted)`);
     return result;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    await query(
-      `UPDATE sync_log SET finished_at = now(), status = 'error', message = $2 WHERE id = $1`,
-      [logId, message],
-    );
+    await recordSync(m.id, c.id, "error", startedAt, 0, message);
     logger.child(`${m.id}:${c.id}`).error(`sync failed: ${message}`);
     throw err;
   }
@@ -209,11 +254,16 @@ export async function runConnectorImport(
   rows: unknown[],
 ): Promise<SyncResult> {
   if (!c.import) return { message: "connector has no import" };
+  const startedAt = new Date();
   const ctx = await buildConnectorContext(m, c);
   const result = await c.import(ctx, rows);
-  await query(
-    "INSERT INTO sync_log (module_id, connector_id, status, finished_at, inserted, message) VALUES ($1, $2, 'ok', now(), $3, $4)",
-    [m.id, c.id, result.inserted ?? 0, result.message ?? `imported ${result.inserted ?? 0}`],
+  await recordSync(
+    m.id,
+    c.id,
+    "ok",
+    startedAt,
+    result.inserted ?? 0,
+    result.message ?? `imported ${result.inserted ?? 0}`,
   );
   return result;
 }
@@ -243,6 +293,7 @@ export async function connectorView(m: LifeStackModule, c: Connector) {
     name: c.name,
     description: c.description,
     kind: c.kind,
+    icon: c.icon ?? null,
     enabled: await isConnectorEnabled(m.id, c.id),
     hasSync: !!c.sync,
     hasImport: !!c.import,

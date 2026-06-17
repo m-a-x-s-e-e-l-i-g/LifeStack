@@ -84,6 +84,7 @@ export interface ConnectorView {
   name: string;
   description: string;
   kind: "api" | "import" | "manual";
+  icon: string | null;
   enabled: boolean;
   hasSync: boolean;
   hasImport: boolean;
@@ -106,4 +107,28 @@ export interface OverviewFeatured extends ModuleMeta {
 export interface OverviewData {
   modules: (ModuleMeta & { enabled: boolean; lastSync: string | null })[];
   featured: OverviewFeatured[];
+}
+
+export interface AiStatus {
+  configured: boolean;
+  model: string | null;
+  baseUrl: string | null;
+  hasKey: boolean;
+}
+
+export interface ChatMessage {
+  role: "user" | "assistant" | "system" | "tool";
+  content: string;
+}
+
+export interface ChatStep {
+  sql: string;
+  rows: Record<string, unknown>[] | null;
+  error: string | null;
+}
+
+export interface ChatResponse {
+  reply: string;
+  steps: ChatStep[];
+  configured: boolean;
 }

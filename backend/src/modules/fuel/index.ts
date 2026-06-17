@@ -1,22 +1,6 @@
-import type { Connector, LifeStackModule, ModuleContext } from "../../core/types";
-import { alreadySeeded, daysAgo, insertMany, iso, rand, randInt, round2 } from "../_demo";
+import type { Connector, LifeStackModule } from "../../core/types";
 
-const COLUMNS = ["day", "liters", "price_per_liter", "cost", "odometer"];
-
-async function seed(ctx: ModuleContext): Promise<void> {
-  if (await alreadySeeded(ctx, "fuel_fillup")) return;
-  const rows: unknown[][] = [];
-  let odometer = 45000;
-  for (let i = 0; i < 24; i++) {
-    const day = daysAgo(288 - i * 12);
-    const dist = randInt(450, 720);
-    odometer += dist;
-    const liters = round2((dist / 100) * rand(6.4, 8.4));
-    const pricePerLiter = round2(1.72 + i * 0.004 + rand(-0.05, 0.05));
-    rows.push([iso(day), liters, pricePerLiter, round2(liters * pricePerLiter), odometer]);
-  }
-  await insertMany(ctx, "fuel_fillup", COLUMNS, rows);
-}
+const round2 = (n: number): number => Math.round(n * 100) / 100;
 
 const csv: Connector = {
   id: "csv",
@@ -29,15 +13,15 @@ const csv: Connector = {
       .map((r) => {
         const liters = Number(r.liters ?? 0);
         const ppl = Number(r.price_per_liter ?? r.pricePerLiter ?? 0);
-        return [
-          String(r.day ?? r.date ?? iso(new Date())).slice(0, 10),
+        return {
+          day: String(r.day ?? r.date ?? new Date().toISOString()).slice(0, 10),
           liters,
-          ppl,
-          Number(r.cost ?? round2(liters * ppl)),
-          Number(r.odometer ?? 0),
-        ];
+          price_per_liter: ppl,
+          cost: Number(r.cost ?? round2(liters * ppl)),
+          odometer: Number(r.odometer ?? 0),
+        };
       });
-    await insertMany(ctx, "fuel_fillup", COLUMNS, values);
+    await ctx.db.insert("fuel_fillup", values);
     return { inserted: values.length };
   },
 };
@@ -50,16 +34,14 @@ const fuel: LifeStackModule = {
   accent: "oklch(0.73 0.16 55)",
   migrations: [
     `CREATE TABLE IF NOT EXISTS fuel_fillup (
-       id serial PRIMARY KEY,
-       day date NOT NULL,
-       liters numeric NOT NULL,
-       price_per_liter numeric NOT NULL,
-       cost numeric NOT NULL,
-       odometer integer NOT NULL
-     )`,
+       day Date,
+       liters Float64,
+       price_per_liter Float64,
+       cost Float64,
+       odometer Int32
+     ) ENGINE = ReplacingMergeTree ORDER BY odometer`,
   ],
   connectors: [csv],
-  seed,
   widgets: [
     {
       id: "avg-consumption",
@@ -68,12 +50,21 @@ const fuel: LifeStackModule = {
       size: "sm",
       featured: true,
       async query(ctx) {
-        const { rows } = await ctx.db.query<{ v: number }>(
-          `WITH f AS (SELECT liters, odometer - lag(odometer) OVER (ORDER BY odometer) AS dist FROM fuel_fillup)
-           SELECT round((coalesce(sum(liters) FILTER (WHERE dist > 0)
-                 / nullif(sum(dist) FILTER (WHERE dist > 0), 0) * 100, 0))::numeric, 2) AS v FROM f`,
+        // Distance between consecutive fill-ups is computed in JS to avoid
+        // window-function edge cases on a deduplicated table.
+        const rows = await ctx.db.query<{ liters: number; odometer: number }>(
+          `SELECT liters, odometer FROM fuel_fillup FINAL ORDER BY odometer`,
         );
-        return { value: rows[0].v, unit: "L/100km" };
+        let litres = 0;
+        let dist = 0;
+        for (let i = 1; i < rows.length; i++) {
+          const d = rows[i].odometer - rows[i - 1].odometer;
+          if (d > 0) {
+            dist += d;
+            litres += rows[i].liters;
+          }
+        }
+        return { value: dist > 0 ? round2((litres / dist) * 100) : 0, unit: "L/100km" };
       },
     },
     {
@@ -83,10 +74,10 @@ const fuel: LifeStackModule = {
       size: "sm",
       featured: true,
       async query(ctx) {
-        const { rows } = await ctx.db.query<{ v: number }>(
-          `SELECT coalesce(sum(cost), 0) AS v FROM fuel_fillup`,
+        const rows = await ctx.db.query<{ v: number }>(
+          `SELECT round(sum(cost), 2) AS v FROM fuel_fillup FINAL`,
         );
-        return { value: round2(rows[0].v), format: "currency" };
+        return { value: rows[0]?.v ?? 0, format: "currency" };
       },
     },
     {
@@ -95,10 +86,10 @@ const fuel: LifeStackModule = {
       type: "metric",
       size: "sm",
       async query(ctx) {
-        const { rows } = await ctx.db.query<{ v: number }>(
-          `SELECT coalesce((SELECT price_per_liter FROM fuel_fillup ORDER BY day DESC LIMIT 1), 0) AS v`,
+        const rows = await ctx.db.query<{ v: number }>(
+          `SELECT price_per_liter AS v FROM fuel_fillup FINAL ORDER BY day DESC LIMIT 1`,
         );
-        return { value: rows[0].v, unit: "€/L" };
+        return { value: rows[0]?.v ?? 0, unit: "€/L" };
       },
     },
     {
@@ -109,12 +100,20 @@ const fuel: LifeStackModule = {
       size: "lg",
       featured: true,
       async query(ctx) {
-        const { rows } = await ctx.db.query(
-          `WITH f AS (SELECT day, liters, odometer - lag(odometer) OVER (ORDER BY odometer) AS dist FROM fuel_fillup)
-           SELECT to_char(day, 'Mon DD') AS label, round((liters / nullif(dist, 0) * 100)::numeric, 2) AS value
-           FROM f WHERE dist > 0 ORDER BY day`,
+        const rows = await ctx.db.query<{
+          label: string;
+          liters: number;
+          odometer: number;
+        }>(
+          `SELECT formatDateTime(day, '%b %d') AS label, liters, odometer
+           FROM fuel_fillup FINAL ORDER BY odometer`,
         );
-        return { series: rows, unit: "L/100km" };
+        const series: { label: string; value: number }[] = [];
+        for (let i = 1; i < rows.length; i++) {
+          const d = rows[i].odometer - rows[i - 1].odometer;
+          if (d > 0) series.push({ label: rows[i].label, value: round2((rows[i].liters / d) * 100) });
+        }
+        return { series, unit: "L/100km" };
       },
     },
     {
@@ -123,8 +122,9 @@ const fuel: LifeStackModule = {
       type: "line",
       size: "md",
       async query(ctx) {
-        const { rows } = await ctx.db.query(
-          `SELECT to_char(day, 'Mon DD') AS label, price_per_liter AS value FROM fuel_fillup ORDER BY day`,
+        const rows = await ctx.db.query(
+          `SELECT formatDateTime(day, '%b %d') AS label, price_per_liter AS value
+           FROM fuel_fillup FINAL ORDER BY day`,
         );
         return { series: rows, format: "currency" };
       },
@@ -135,9 +135,10 @@ const fuel: LifeStackModule = {
       type: "bar",
       size: "md",
       async query(ctx) {
-        const { rows } = await ctx.db.query(
-          `SELECT to_char(date_trunc('month', day), 'Mon') AS label, round(sum(cost)::numeric, 2) AS value
-           FROM fuel_fillup GROUP BY date_trunc('month', day) ORDER BY date_trunc('month', day)`,
+        const rows = await ctx.db.query(
+          `SELECT formatDateTime(m, '%b') AS label, round(s, 2) AS value
+           FROM (SELECT toStartOfMonth(day) AS m, sum(cost) AS s FROM fuel_fillup FINAL GROUP BY m)
+           ORDER BY m`,
         );
         return { series: rows, format: "currency" };
       },
@@ -148,10 +149,10 @@ const fuel: LifeStackModule = {
       type: "table",
       size: "lg",
       async query(ctx) {
-        const { rows } = await ctx.db.query(
-          `SELECT to_char(day, 'YYYY-MM-DD') AS date, liters, price_per_liter AS price,
-                  round(cost::numeric, 2) AS cost, odometer
-           FROM fuel_fillup ORDER BY day DESC LIMIT 12`,
+        const rows = await ctx.db.query(
+          `SELECT toString(day) AS date, liters, price_per_liter AS price,
+                  round(cost, 2) AS cost, odometer
+           FROM fuel_fillup FINAL ORDER BY day DESC LIMIT 12`,
         );
         return {
           columns: [

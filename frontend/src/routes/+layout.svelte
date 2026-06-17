@@ -27,7 +27,8 @@
   }
 
   const path = $derived($page.url.pathname);
-  const onOverview = $derived(path === "/");
+  const onChat = $derived(path === "/");
+  const onOverview = $derived(path === "/overview");
   const onSettings = $derived(path.startsWith("/settings"));
 </script>
 
@@ -43,7 +44,11 @@
     </a>
 
     <nav>
-      <a href="/" class="item" class:active={onOverview} onclick={() => (navOpen = false)}>
+      <a href="/" class="item" class:active={onChat} onclick={() => (navOpen = false)}>
+        <span class="glyph">✦</span>
+        <span class="label">Assistant</span>
+      </a>
+      <a href="/overview" class="item" class:active={onOverview} onclick={() => (navOpen = false)}>
         <span class="glyph">◆</span>
         <span class="label">Overview</span>
       </a>

@@ -71,6 +71,7 @@
   <div class="top">
     <div class="meta">
       <div class="name-row">
+        {#if connector.icon}<span class="cicon">{@html connector.icon}</span>{/if}
         <span class="name">{connector.name}</span>
         <span class="kind kind--{connector.kind}">{connector.kind}</span>
       </div>
@@ -153,6 +154,16 @@
     display: flex;
     align-items: center;
     gap: var(--s2);
+  }
+  .cicon {
+    display: inline-flex;
+    width: 17px;
+    height: 17px;
+    color: var(--accent);
+  }
+  .cicon :global(svg) {
+    width: 100%;
+    height: 100%;
   }
   .name {
     font-weight: 600;

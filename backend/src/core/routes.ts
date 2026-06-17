@@ -15,6 +15,7 @@ import {
   setConnectorEnabled,
   setModuleEnabled,
 } from "./registry";
+import { aiStatus, chat, setAiConfig, type ChatMessage } from "./ai";
 
 function meta(m: LifeStackModule) {
   return {
@@ -212,5 +213,30 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       }
     }
     return { modules, featured };
+  });
+
+  // ----- AI assistant (chat-first) -----------------------------------------
+
+  app.get("/api/ai/status", async () => aiStatus());
+
+  app.put<{ Body: { baseUrl?: string; apiKey?: string; model?: string } }>(
+    "/api/ai/config",
+    async (req) => {
+      await setAiConfig(req.body ?? {});
+      return { ok: true, status: await aiStatus() };
+    },
+  );
+
+  app.post<{ Body: { messages?: ChatMessage[] } }>("/api/chat", async (req, reply) => {
+    const messages = Array.isArray(req.body?.messages) ? req.body!.messages : [];
+    if (messages.length === 0)
+      return reply.code(400).send({ error: "messages array is required" });
+    try {
+      return await chat(messages);
+    } catch (err) {
+      return reply
+        .code(502)
+        .send({ error: err instanceof Error ? err.message : String(err) });
+    }
   });
 }

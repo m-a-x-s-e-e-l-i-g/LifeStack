@@ -6,14 +6,12 @@ import { logger } from "./logger";
 import { registerRoutes } from "./core/routes";
 import { initModules } from "./core/registry";
 import { startScheduler } from "./core/scheduler";
-import { seedDemoIfNeeded } from "./core/seed";
 
 async function main(): Promise<void> {
   logger.info("LifeStack backend starting");
   await waitForDb();
   await runCoreMigrations();
   await initModules();
-  if (env.SEED_DEMO) await seedDemoIfNeeded();
 
   const app = Fastify({ logger: false, bodyLimit: 10 * 1024 * 1024 });
   await app.register(cors, { origin: true });
