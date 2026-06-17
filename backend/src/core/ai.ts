@@ -240,18 +240,11 @@ function normalizeProviderName(value: unknown): string {
 function normalizeRideType(rawType: unknown, provider: string): string {
   const t = String(rawType ?? "").trim().toLowerCase();
   const p = provider.toLowerCase();
-  if (t.includes("scooter") || p.includes("lime") || p.includes("tier") || p.includes("bird"))
+  if (p.includes("lime") || p.includes("tier") || p.includes("bird") || t.includes("scooter"))
     return "scooter";
+  if (p.includes("uber") || p.includes("bolt") || p.includes("lyft")) return "taxi";
   if (t.includes("bike") || t.includes("bicycle") || t.includes("cycle")) return "bike";
-  if (
-    t.includes("taxi") ||
-    t.includes("cab") ||
-    t.includes("car") ||
-    t.includes("ride") ||
-    p.includes("uber") ||
-    p.includes("bolt") ||
-    p.includes("lyft")
-  )
+  if (t.includes("taxi") || t.includes("cab") || t.includes("car") || t.includes("ride"))
     return "taxi";
   return t || "ride";
 }
