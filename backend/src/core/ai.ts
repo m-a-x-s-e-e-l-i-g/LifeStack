@@ -200,7 +200,12 @@ async function callModel(
   return msg;
 }
 
-type WriteTarget = "mobility_ride" | "finance_tx" | "fuel_fillup" | "energy_reading";
+type WriteTarget =
+  | "mobility_ride"
+  | "finance_tx"
+  | "fuel_fillup"
+  | "energy_reading"
+  | "food_order";
 
 function num(value: unknown, fallback = 0): number {
   const n = Number(value);
@@ -256,6 +261,21 @@ function normalizeRow(target: WriteTarget, raw: Record<string, unknown>): Record
       price_per_liter: ppl,
       cost: num(raw.cost ?? liters * ppl),
       odometer: int(raw.odometer ?? raw.km_total ?? 0),
+    };
+  }
+  if (target === "food_order") {
+    return {
+      day: day(raw.day ?? raw.date),
+      provider: String(raw.provider ?? raw.app ?? "Takeaway"),
+      merchant: String(raw.merchant ?? raw.restaurant ?? raw.store ?? "Unknown"),
+      total: num(raw.total ?? raw.cost ?? raw.amount),
+      currency: String(raw.currency ?? "EUR"),
+      items: int(raw.items ?? raw.item_count ?? raw.count ?? 0),
+      delivery_fee: num(raw.delivery_fee ?? raw.deliveryFee ?? 0),
+      service_fee: num(raw.service_fee ?? raw.serviceFee ?? 0),
+      tip: num(raw.tip ?? 0),
+      notes: String(raw.notes ?? raw.note ?? ""),
+      source: "assistant",
     };
   }
   return {
@@ -366,7 +386,13 @@ const TOOLS = [
         properties: {
           target: {
             type: "string",
-            enum: ["mobility_ride", "finance_tx", "fuel_fillup", "energy_reading"],
+            enum: [
+              "mobility_ride",
+              "finance_tx",
+              "fuel_fillup",
+              "energy_reading",
+              "food_order",
+            ],
             description: "Target local table for the new records.",
           },
           rows: {
@@ -393,6 +419,7 @@ ${schema}
 Rules:
 - To get any number, call run_sql. Never invent values; if a query returns no rows, say the data is not there yet.
 - For screenshot imports, extract structured entries and call write_records with the correct target table and rows.
+- Food delivery screenshots (Uber Eats, takeaway.com, thuisbezorgd) should be written to food_order.
 - Only write when the user explicitly asks to save/import data.
 - ClickHouse dialect: use today(), now(), toStartOfMonth(x), toYYYYMM(x), formatDateTime(x, '%b'), countIf(cond), sumIf(x, cond), uniqExact(x), arrayJoin(arr). Date math uses INTERVAL, e.g. today() - INTERVAL 12 MONTH.
 - Tables holding deduplicated entities use ReplacingMergeTree; add FINAL after the table name (e.g. FROM watch_history FINAL) so re-synced rows are not double counted.
@@ -519,7 +546,15 @@ export async function chat(
           content = JSON.stringify({ rowCount: out.rows.length, rows: out.rows.slice(0, 50) });
         } else if (call.function.name === "write_records") {
           const target = String(args.target ?? "") as WriteTarget;
-          if (!["mobility_ride", "finance_tx", "fuel_fillup", "energy_reading"].includes(target)) {
+          if (
+            ![
+              "mobility_ride",
+              "finance_tx",
+              "fuel_fillup",
+              "energy_reading",
+              "food_order",
+            ].includes(target)
+          ) {
             throw new Error("Unsupported write target");
           }
           const result = await writeRecords(target, Array.isArray(args.rows) ? args.rows : []);

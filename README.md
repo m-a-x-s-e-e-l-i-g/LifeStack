@@ -5,7 +5,7 @@
 **Your life, in numbers. Self-hosted, modular, AI-first, and yours alone.**
 
 LifeStack is a Docker-first personal statistics platform. Plug in modules for the things
-you do (watch movies and shows, spend money, burn fuel, use energy, take scooter rides),
+you do (watch movies and shows, spend money, burn fuel, use energy, take scooter rides, order food),
 store everything in ClickHouse, and ask a built-in assistant questions about it in plain
 language. No cloud, no telemetry, no account, no mock data. Just `docker compose up`.
 
@@ -83,7 +83,7 @@ the most on last month?"*, or *"Show my electricity cost by month."*
 ## Modules
 
 Each module is a **domain** that owns its schema, statistics, and accent color. Data flows
-in through **connectors** (pluggable sources). Ships with five modules:
+in through **connectors** (pluggable sources). Ships with six modules:
 
 | Module          | Domain              | Connectors                  | Sample statistics |
 |-----------------|---------------------|-----------------------------|-------------------|
@@ -92,6 +92,7 @@ in through **connectors** (pluggable sources). Ships with five modules:
 | **Energy**      | Home electricity     | Tibber (API), assistant     | kWh per month, day vs night split, cost, usage calendar |
 | **Fuel**        | Fuel consumption     | Assistant screenshot import | L/100km economy, price/L trend, cost per month, total spend |
 | **Mobility**    | Scooter & rides      | Assistant screenshot import | Rides per provider, spend, distance, monthly trend |
+| **Food orders** | Delivery takeout     | Assistant screenshot import | Orders this month, spend this month, average order value, provider split, spend per month, recent orders |
 
 The **Trakt** connector performs a **full sync**: watch history (movies and episodes),
 ratings (movies, shows, seasons, episodes), watchlist, collection, and your profile stats.
@@ -162,7 +163,7 @@ and you only need to authorize and paste the PIN.
                        │                                            │
                        │   modules/                                 │
                        │    ├─ watching ├─ finance  ├─ fuel         │
-                       │    ├─ energy   └─ mobility                 │
+                       │    ├─ energy   ├─ mobility └─ food         │
                        │       module: migrations · widgets         │
                        │       connectors: trakt · tibber            │
                        └───────────────────────┬────────────────────┘
@@ -254,7 +255,7 @@ export default steps;
 
 ```ts
 import steps from "./steps";
-export const modules = [watching, finance, energy, fuel, mobility, steps];
+export const modules = [watching, finance, energy, fuel, mobility, food, steps];
 ```
 
 Restart the backend. The module appears in Settings, ready to enable, and the assistant can
@@ -295,7 +296,7 @@ LifeStack/
 ├─ backend/                  Fastify aggregator + module system
 │  └─ src/
 │     ├─ core/               types · db · registry · scheduler · routes · ai
-│     └─ modules/            watching · finance · energy · fuel · mobility
+│     └─ modules/            watching · finance · energy · fuel · mobility · food
 │                            (each module owns connectors + widgets)
 ├─ frontend/                 SvelteKit dashboard + assistant
 │  └─ src/

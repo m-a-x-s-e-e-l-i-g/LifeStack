@@ -33,6 +33,7 @@
     energy: "Show my electricity cost by month this year.",
     fuel: "What is my average fuel economy in L/100km?",
     mobility: "I uploaded an Uber receipt screenshot. Extract it and save it as mobility data.",
+    food: "I uploaded an Uber Eats screenshot. Extract the order and save it as food_order data.",
   };
 
   const suggestions = $derived(
