@@ -1,6 +1,7 @@
 export type WidgetType =
   | "metric"
   | "statpanel"
+  | "split"
   | "bar"
   | "line"
   | "donut"
@@ -57,6 +58,15 @@ export interface StatPanelRow {
 }
 export interface StatPanelData {
   segments: { label: string; rows: StatPanelRow[] }[];
+}
+export interface SplitPart {
+  label: string;
+  value: number | string;
+  unit?: string;
+  format?: string;
+}
+export interface SplitData {
+  parts: SplitPart[];
 }
 export interface SeriesPoint {
   label: string;

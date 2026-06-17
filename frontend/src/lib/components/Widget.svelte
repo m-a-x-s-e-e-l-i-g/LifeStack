@@ -2,6 +2,7 @@
   import type { WidgetResult } from "$lib/types";
   import Metric from "./Metric.svelte";
   import StatPanel from "./StatPanel.svelte";
+  import SplitMetric from "./SplitMetric.svelte";
   import BarChart from "./BarChart.svelte";
   import LineChart from "./LineChart.svelte";
   import DonutChart from "./DonutChart.svelte";
@@ -23,6 +24,11 @@
           return (
             !d.segments?.length ||
             d.segments.every((s: any) => s.rows?.every((r: any) => !r.minutes && !r.count))
+          );
+        case "split":
+          return (
+            !d.parts?.length ||
+            d.parts.every((p: any) => p.value === undefined || p.value === null)
           );
         case "bar":
         case "line":
@@ -57,6 +63,8 @@
       <Metric data={d} {accent} />
     {:else if widget.type === "statpanel"}
       <StatPanel data={d} {accent} />
+    {:else if widget.type === "split"}
+      <SplitMetric data={d} {accent} />
     {:else if widget.type === "bar"}
       <BarChart data={d} {accent} />
     {:else if widget.type === "line"}

@@ -495,13 +495,22 @@ const watching: LifeStackModule = {
       id: "unique",
       title: "Unique titles",
       subtitle: "All time",
-      type: "metric",
-      size: "sm",
+      type: "split",
+      size: "md",
       async query(ctx) {
-        const rows = await ctx.db.query<{ v: number }>(
-          `SELECT toInt32(uniqExact(title)) AS v FROM watch_history FINAL`,
+        const rows = await ctx.db.query<{ series: number; movies: number }>(
+          `SELECT
+             toInt32(uniqExactIf(title, kind = 'episode')) AS series,
+             toInt32(uniqExactIf(title, kind = 'movie')) AS movies
+           FROM watch_history FINAL`,
         );
-        return { value: rows[0]?.v ?? 0, unit: "titles" };
+        const r = rows[0] ?? { series: 0, movies: 0 };
+        return {
+          parts: [
+            { label: "Series", value: r.series, unit: "series" },
+            { label: "Movies", value: r.movies, unit: "movies" },
+          ],
+        };
       },
     },
     {
