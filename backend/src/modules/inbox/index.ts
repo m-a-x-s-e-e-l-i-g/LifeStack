@@ -226,15 +226,188 @@ async function existingDedupe(ctx: ConnectorContext, keys: string[]): Promise<Se
   return seen;
 }
 
-const PROVIDER_TOGGLES = [
-  { key: "scanUber", label: "Scan Uber rides", icon: "https://upload.wikimedia.org/wikipedia/commons/thumb/5/58/Uber_logo_2018.svg/1024px-Uber_logo_2018.svg.png" },
-  { key: "scanLime", label: "Scan Lime rides", icon: "https://upload.wikimedia.org/wikipedia/commons/thumb/c/c3/Lime_logo.svg/1024px-Lime_logo.svg.png" },
-  { key: "scanBolt", label: "Scan Bolt rides", icon: "https://upload.wikimedia.org/wikipedia/commons/thumb/3/33/Bolt_%28company%29_logo.svg/1024px-Bolt_%28company%29_logo.svg.png" },
+const MOBILITY_TOGGLES = [
+  { key: "scanUber", label: "Scan Uber rides", icon: "https://upload.wikimedia.org/wikipedia/commons/6/62/Uber_logo.svg" },
+  { key: "scanLime", label: "Scan Lime rides", icon: "https://upload.wikimedia.org/wikipedia/commons/e/e1/Lime_%28transportation_company%29_logo.svg" },
+  { key: "scanBolt", label: "Scan Bolt rides", icon: "https://upload.wikimedia.org/wikipedia/commons/2/28/Vector_logo_of_Bolt.svg" },
+];
+
+const FOOD_TOGGLES = [
   { key: "scanThuisbezorgd", label: "Scan Thuisbezorgd orders", icon: "https://upload.wikimedia.org/wikipedia/commons/thumb/a/a9/Thuisbezorgd.svg/1024px-Thuisbezorgd.svg.png" },
   { key: "scanUberEats", label: "Scan Uber Eats orders", icon: "https://upload.wikimedia.org/wikipedia/commons/thumb/1/1c/Uber_Eats.svg/1024px-Uber_Eats.svg.png" },
+];
+
+const GROCERY_TOGGLES = [
   { key: "scanAlbertHeijn", label: "Scan Albert Heijn receipts", icon: "https://upload.wikimedia.org/wikipedia/commons/thumb/1/1c/Albert_Heijn_logo.svg/1024px-Albert_Heijn_logo.svg.png" },
   { key: "scanJumbo", label: "Scan Jumbo receipts", icon: "https://upload.wikimedia.org/wikipedia/commons/thumb/c/cc/Jumbo_supermarkt_logo.svg/1024px-Jumbo_supermarkt_logo.svg.png" },
 ];
+
+const ALL_PROVIDER_TOGGLES = [...MOBILITY_TOGGLES, ...FOOD_TOGGLES, ...GROCERY_TOGGLES];
+
+async function exchangeGmailCode(code: string): Promise<{ accessToken: string; refreshToken: string }> {
+  const clientId = process.env.GMAIL_CLIENT_ID ?? "";
+  const clientSecret = process.env.GMAIL_CLIENT_SECRET ?? "";
+  const redirectUri = process.env.GMAIL_REDIRECT_URI ?? "http://localhost:3000/api/oauth/gmail";
+
+  if (!clientId || !clientSecret) throw new Error("Gmail OAuth credentials not configured.");
+
+  const res = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "authorization_code",
+      code,
+      client_id: clientId,
+      client_secret: clientSecret,
+      redirect_uri: redirectUri,
+    }).toString(),
+  });
+
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`Gmail OAuth failed: ${err}`);
+  }
+
+  const data = (await res.json()) as { access_token?: string; refresh_token?: string };
+  if (!data.access_token) throw new Error("No access token from Gmail.");
+  return { accessToken: data.access_token, refreshToken: data.refresh_token ?? "" };
+}
+
+async function refreshGmailToken(refreshToken: string): Promise<string> {
+  const clientId = process.env.GMAIL_CLIENT_ID ?? "";
+  const clientSecret = process.env.GMAIL_CLIENT_SECRET ?? "";
+
+  if (!clientId || !clientSecret) throw new Error("Gmail OAuth credentials not configured.");
+
+  const res = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "refresh_token",
+      refresh_token: refreshToken,
+      client_id: clientId,
+      client_secret: clientSecret,
+    }).toString(),
+  });
+
+  if (!res.ok) throw new Error("Gmail token refresh failed.");
+  const data = (await res.json()) as { access_token?: string };
+  return data.access_token ?? "";
+}
+
+async function fetchGmailMessages(accessToken: string, lookbackDays: number): Promise<Array<{ id: string; headers: Record<string, string>; body: string }>> {
+  const q = `after:${Math.floor(Date.now() / 1000) - lookbackDays * 24 * 60 * 60}`;
+  const res = await fetch(`https://www.googleapis.com/gmail/v1/users/me/messages?q=${encodeURIComponent(q)}&maxResults=50`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+
+  if (res.status === 401) throw new Error("Gmail token expired or invalid.");
+  if (!res.ok) throw new Error(`Gmail API error ${res.status}`);
+
+  const data = (await res.json()) as { messages?: Array<{ id: string }> };
+  const messages = [];
+
+  for (const msg of data.messages ?? []) {
+    const msgRes = await fetch(`https://www.googleapis.com/gmail/v1/users/me/messages/${msg.id}?format=full`, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    if (msgRes.ok) {
+      const msgData = (await msgRes.json()) as { id: string; payload?: { headers?: Array<{ name: string; value: string }>; parts?: Array<{ body?: { data?: string } }> } };
+      const headers: Record<string, string> = {};
+      (msgData.payload?.headers ?? []).forEach((h) => {
+        headers[h.name.toLowerCase()] = h.value;
+      });
+      const bodyParts = msgData.payload?.parts ?? [];
+      const bodyData = bodyParts.find((p) => p.body?.data)?.body?.data ?? "";
+      const body = bodyData ? Buffer.from(bodyData, "base64").toString("utf-8") : "";
+      messages.push({ id: msgData.id, headers, body });
+    }
+  }
+  return messages;
+}
+
+async function exchangeOutlookCode(code: string): Promise<{ accessToken: string; refreshToken: string }> {
+  const clientId = process.env.OUTLOOK_CLIENT_ID ?? "";
+  const clientSecret = process.env.OUTLOOK_CLIENT_SECRET ?? "";
+  const redirectUri = process.env.OUTLOOK_REDIRECT_URI ?? "http://localhost:3000/api/oauth/outlook";
+
+  if (!clientId || !clientSecret) throw new Error("Outlook OAuth credentials not configured.");
+
+  const res = await fetch("https://login.microsoftonline.com/common/oauth2/v2.0/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "authorization_code",
+      code,
+      client_id: clientId,
+      client_secret: clientSecret,
+      redirect_uri: redirectUri,
+      scope: "Mail.Read",
+    }).toString(),
+  });
+
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`Outlook OAuth failed: ${err}`);
+  }
+
+  const data = (await res.json()) as { access_token?: string; refresh_token?: string };
+  if (!data.access_token) throw new Error("No access token from Outlook.");
+  return { accessToken: data.access_token, refreshToken: data.refresh_token ?? "" };
+}
+
+async function refreshOutlookToken(refreshToken: string): Promise<string> {
+  const clientId = process.env.OUTLOOK_CLIENT_ID ?? "";
+  const clientSecret = process.env.OUTLOOK_CLIENT_SECRET ?? "";
+
+  if (!clientId || !clientSecret) throw new Error("Outlook OAuth credentials not configured.");
+
+  const res = await fetch("https://login.microsoftonline.com/common/oauth2/v2.0/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "refresh_token",
+      refresh_token: refreshToken,
+      client_id: clientId,
+      client_secret: clientSecret,
+      scope: "Mail.Read",
+    }).toString(),
+  });
+
+  if (!res.ok) throw new Error("Outlook token refresh failed.");
+  const data = (await res.json()) as { access_token?: string };
+  return data.access_token ?? "";
+}
+
+async function fetchOutlookMessages(accessToken: string, lookbackDays: number): Promise<Array<{ id: string; subject: string; body: string; receivedDateTime: string }>> {
+  const sinceDate = new Date(Date.now() - lookbackDays * 24 * 60 * 60 * 1000).toISOString();
+  const res = await fetch(
+    `https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages?$filter=receivedDateTime ge ${encodeURIComponent(sinceDate)}&$top=50`,
+    { headers: { Authorization: `Bearer ${accessToken}` } },
+  );
+
+  if (res.status === 401) throw new Error("Outlook token expired or invalid.");
+  if (!res.ok) throw new Error(`Outlook API error ${res.status}`);
+
+  const data = (await res.json()) as { value?: Array<{ id: string; subject: string; bodyPreview: string; receivedDateTime: string }> };
+  const messages: Array<{ id: string; subject: string; body: string; receivedDateTime: string }> = [];
+
+  for (const msg of data.value ?? []) {
+    const bodyRes = await fetch(`https://graph.microsoft.com/v1.0/me/messages/${msg.id}`, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    if (bodyRes.ok) {
+      const bodyData = (await bodyRes.json()) as { body?: { content?: string } };
+      messages.push({
+        id: msg.id,
+        subject: msg.subject,
+        body: bodyData.body?.content ?? msg.bodyPreview,
+        receivedDateTime: msg.receivedDateTime,
+      });
+    }
+  }
+  return messages;
+}
 
 const gmailConnector: Connector = {
   id: "gmail",
@@ -244,20 +417,135 @@ const gmailConnector: Connector = {
   syncIntervalMinutes: 30,
   hasAuthorize: true,
   configSchema: [
-    ...PROVIDER_TOGGLES.map((p) => ({ key: p.key, label: p.label, type: "boolean" as const, default: true, icon: p.icon })),
+    { key: "section_mobility", label: "Mobility", type: "section" as const },
+    ...MOBILITY_TOGGLES.map((p) => ({ key: p.key, label: p.label, type: "boolean" as const, default: true, icon: p.icon })),
+    { key: "section_food", label: "Food & Delivery", type: "section" as const },
+    ...FOOD_TOGGLES.map((p) => ({ key: p.key, label: p.label, type: "boolean" as const, default: true, icon: p.icon })),
+    { key: "section_groceries", label: "Groceries", type: "section" as const },
+    ...GROCERY_TOGGLES.map((p) => ({ key: p.key, label: p.label, type: "boolean" as const, default: true, icon: p.icon })),
   ],
   async authorize(ctx, input) {
     if (input.disconnect) {
       await ctx.saveConfig({ gmailAccessToken: "", gmailRefreshToken: "" });
       return { message: "Disconnected from Gmail." };
     }
-    throw new Error("Gmail OAuth setup required in config.");
+
+    const code = String(input.code ?? "").trim();
+    if (!code) throw new Error("Paste the authorization code from Gmail.");
+
+    try {
+      const { accessToken, refreshToken } = await exchangeGmailCode(code);
+      await ctx.saveConfig({ gmailAccessToken: accessToken, gmailRefreshToken: refreshToken });
+      return { message: "Connected to Gmail." };
+    } catch (e) {
+      throw new Error(`Gmail connection failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
   },
   async sync(ctx) {
-    const token = String(ctx.config.gmailAccessToken ?? "").trim();
+    let token = String(ctx.config.gmailAccessToken ?? "").trim();
+    const refreshToken = String(ctx.config.gmailRefreshToken ?? "").trim();
+    const lookbackDays = Math.max(1, Math.round(Number(ctx.config.lookbackDays ?? 14)));
+
     if (!token) throw new Error("Connect Gmail first.");
-    // TODO: Implement Gmail API sync using token
-    throw new Error("Gmail API sync not yet implemented. Use Mailbox (IMAP) for now.");
+
+    try {
+      const messages = await fetchGmailMessages(token, lookbackDays);
+      const mobilityRows: Record<string, unknown>[] = [];
+      const foodRows: Record<string, unknown>[] = [];
+      const groceryRows: Record<string, unknown>[] = [];
+      const seenRows: Record<string, unknown>[] = [];
+      const existing = await existingDedupe(
+        ctx,
+        messages.map((m) => `gmail|${m.id}`),
+      );
+
+      for (const msg of messages) {
+        const key = `gmail|${msg.id}`;
+        if (existing.has(key)) continue;
+
+        const body = [msg.headers.subject ?? "", msg.body].join("\n");
+        const date = new Date(msg.headers.date ?? new Date());
+        const candidates = detectCandidates(body, msg.id, date, ctx.config);
+
+        for (const c of candidates) {
+          if (c.kind === "mobility") {
+            const cost = round2(c.amount);
+            const currency = normCurrency(c.currency);
+            mobilityRows.push({
+              day: c.day,
+              started_at: c.startedAt,
+              provider: c.provider,
+              type: c.type,
+              distance_km: round2(c.distanceKm),
+              duration_min: Math.round(c.durationMin),
+              cost,
+              cost_currency: currency,
+              cost_eur: toEur(cost, currency),
+            });
+          } else if (c.kind === "groceries") {
+            const amount = round2(c.amount);
+            const currency = normCurrency(c.currency);
+            groceryRows.push({
+              day: c.day,
+              message_id: msg.id,
+              store: c.provider,
+              amount,
+              currency,
+              cost_eur: toEur(amount, currency),
+              items_count: c.itemsCount ?? 0,
+            });
+          } else {
+            foodRows.push({
+              day: c.day,
+              provider: c.provider,
+              merchant: c.merchant || "Unknown",
+              total: round2(c.amount),
+              currency: normCurrency(c.currency),
+              items: 0,
+              delivery_fee: 0,
+              service_fee: 0,
+              tip: 0,
+              notes: "Imported from Gmail receipt scan",
+              source: "gmail",
+            });
+          }
+
+          seenRows.push({
+            day: c.day,
+            dedupe_key: `${c.kind}|${c.provider}|${msg.id}`,
+            provider: c.provider,
+            kind: c.kind,
+            message_id: msg.id,
+            created_at: new Date().toISOString(),
+          });
+        }
+      }
+
+      if (mobilityRows.length > 0) await ctx.db.insert("mobility_ride", mobilityRows);
+      if (foodRows.length > 0) await ctx.db.insert("food_order", foodRows);
+      if (groceryRows.length > 0) await ctx.db.insert("grocery_receipt", groceryRows);
+      if (seenRows.length > 0) await ctx.db.insert("inbox_receipt_seen", seenRows);
+
+      const inserted = mobilityRows.length + foodRows.length + groceryRows.length;
+      return {
+        inserted,
+        message: `Scanned ${messages.length} Gmail message(s), inserted ${inserted} entries.`,
+      };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (msg.includes("expired")) {
+        if (refreshToken) {
+          try {
+            token = await refreshGmailToken(refreshToken);
+            await ctx.saveConfig({ gmailAccessToken: token });
+            return { message: "Gmail session refreshed. Please retry sync." };
+          } catch {
+            throw new Error("Gmail token expired. Reconnect to refresh.");
+          }
+        }
+      }
+      throw e;
+    }
   },
 };
 
@@ -269,20 +557,135 @@ const outlookConnector: Connector = {
   syncIntervalMinutes: 30,
   hasAuthorize: true,
   configSchema: [
-    ...PROVIDER_TOGGLES.map((p) => ({ key: p.key, label: p.label, type: "boolean" as const, default: true, icon: p.icon })),
+    { key: "section_mobility", label: "Mobility", type: "section" as const },
+    ...MOBILITY_TOGGLES.map((p) => ({ key: p.key, label: p.label, type: "boolean" as const, default: true, icon: p.icon })),
+    { key: "section_food", label: "Food & Delivery", type: "section" as const },
+    ...FOOD_TOGGLES.map((p) => ({ key: p.key, label: p.label, type: "boolean" as const, default: true, icon: p.icon })),
+    { key: "section_groceries", label: "Groceries", type: "section" as const },
+    ...GROCERY_TOGGLES.map((p) => ({ key: p.key, label: p.label, type: "boolean" as const, default: true, icon: p.icon })),
   ],
   async authorize(ctx, input) {
     if (input.disconnect) {
       await ctx.saveConfig({ outlookAccessToken: "", outlookRefreshToken: "" });
       return { message: "Disconnected from Outlook." };
     }
-    throw new Error("Outlook OAuth setup required in config.");
+
+    const code = String(input.code ?? "").trim();
+    if (!code) throw new Error("Paste the authorization code from Outlook.");
+
+    try {
+      const { accessToken, refreshToken } = await exchangeOutlookCode(code);
+      await ctx.saveConfig({ outlookAccessToken: accessToken, outlookRefreshToken: refreshToken });
+      return { message: "Connected to Outlook." };
+    } catch (e) {
+      throw new Error(`Outlook connection failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
   },
   async sync(ctx) {
-    const token = String(ctx.config.outlookAccessToken ?? "").trim();
+    let token = String(ctx.config.outlookAccessToken ?? "").trim();
+    const refreshToken = String(ctx.config.outlookRefreshToken ?? "").trim();
+    const lookbackDays = Math.max(1, Math.round(Number(ctx.config.lookbackDays ?? 14)));
+
     if (!token) throw new Error("Connect Outlook first.");
-    // TODO: Implement Outlook API sync using token
-    throw new Error("Outlook API sync not yet implemented. Use Mailbox (IMAP) for now.");
+
+    try {
+      const messages = await fetchOutlookMessages(token, lookbackDays);
+      const mobilityRows: Record<string, unknown>[] = [];
+      const foodRows: Record<string, unknown>[] = [];
+      const groceryRows: Record<string, unknown>[] = [];
+      const seenRows: Record<string, unknown>[] = [];
+      const existing = await existingDedupe(
+        ctx,
+        messages.map((m) => `outlook|${m.id}`),
+      );
+
+      for (const msg of messages) {
+        const key = `outlook|${msg.id}`;
+        if (existing.has(key)) continue;
+
+        const body = [msg.subject, msg.body].join("\n");
+        const date = new Date(msg.receivedDateTime);
+        const candidates = detectCandidates(body, msg.id, date, ctx.config);
+
+        for (const c of candidates) {
+          if (c.kind === "mobility") {
+            const cost = round2(c.amount);
+            const currency = normCurrency(c.currency);
+            mobilityRows.push({
+              day: c.day,
+              started_at: c.startedAt,
+              provider: c.provider,
+              type: c.type,
+              distance_km: round2(c.distanceKm),
+              duration_min: Math.round(c.durationMin),
+              cost,
+              cost_currency: currency,
+              cost_eur: toEur(cost, currency),
+            });
+          } else if (c.kind === "groceries") {
+            const amount = round2(c.amount);
+            const currency = normCurrency(c.currency);
+            groceryRows.push({
+              day: c.day,
+              message_id: msg.id,
+              store: c.provider,
+              amount,
+              currency,
+              cost_eur: toEur(amount, currency),
+              items_count: c.itemsCount ?? 0,
+            });
+          } else {
+            foodRows.push({
+              day: c.day,
+              provider: c.provider,
+              merchant: c.merchant || "Unknown",
+              total: round2(c.amount),
+              currency: normCurrency(c.currency),
+              items: 0,
+              delivery_fee: 0,
+              service_fee: 0,
+              tip: 0,
+              notes: "Imported from Outlook receipt scan",
+              source: "outlook",
+            });
+          }
+
+          seenRows.push({
+            day: c.day,
+            dedupe_key: `${c.kind}|${c.provider}|${msg.id}`,
+            provider: c.provider,
+            kind: c.kind,
+            message_id: msg.id,
+            created_at: new Date().toISOString(),
+          });
+        }
+      }
+
+      if (mobilityRows.length > 0) await ctx.db.insert("mobility_ride", mobilityRows);
+      if (foodRows.length > 0) await ctx.db.insert("food_order", foodRows);
+      if (groceryRows.length > 0) await ctx.db.insert("grocery_receipt", groceryRows);
+      if (seenRows.length > 0) await ctx.db.insert("inbox_receipt_seen", seenRows);
+
+      const inserted = mobilityRows.length + foodRows.length + groceryRows.length;
+      return {
+        inserted,
+        message: `Scanned ${messages.length} Outlook message(s), inserted ${inserted} entries.`,
+      };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (msg.includes("expired")) {
+        if (refreshToken) {
+          try {
+            token = await refreshOutlookToken(refreshToken);
+            await ctx.saveConfig({ outlookAccessToken: token });
+            return { message: "Outlook session refreshed. Please retry sync." };
+          } catch {
+            throw new Error("Outlook token expired. Reconnect to refresh.");
+          }
+        }
+      }
+      throw e;
+    }
   },
 };
 
@@ -303,8 +706,12 @@ const mailReceipts: Connector = {
     { key: "mailbox", label: "Folder", type: "text", default: "INBOX" },
     { key: "scanDays", label: "Look back days", type: "number", default: 14 },
     { key: "maxMessages", label: "Max emails per sync", type: "number", default: 400 },
-    { key: "section_providers", label: "Receipt scanning", type: "section" as const },
-    ...PROVIDER_TOGGLES.map((p) => ({ key: p.key, label: p.label, type: "boolean" as const, default: true, icon: p.icon })),
+    { key: "section_mobility_scan", label: "Mobility", type: "section" as const },
+    ...MOBILITY_TOGGLES.map((p) => ({ key: p.key, label: p.label, type: "boolean" as const, default: true, icon: p.icon })),
+    { key: "section_food_scan", label: "Food & Delivery", type: "section" as const },
+    ...FOOD_TOGGLES.map((p) => ({ key: p.key, label: p.label, type: "boolean" as const, default: true, icon: p.icon })),
+    { key: "section_groceries_scan", label: "Groceries", type: "section" as const },
+    ...GROCERY_TOGGLES.map((p) => ({ key: p.key, label: p.label, type: "boolean" as const, default: true, icon: p.icon })),
   ],
   async sync(ctx) {
     const host = String(ctx.config.imapHost ?? "").trim();
