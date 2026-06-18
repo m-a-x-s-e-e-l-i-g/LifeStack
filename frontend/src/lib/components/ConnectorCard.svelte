@@ -290,22 +290,29 @@
       </p>
       <div class="fields">
         {#each connector.config as f (f.key)}
-          <label class="field">
-            <span class="flabel">{f.label}</span>
-            {#if f.type === "boolean"}
-              <input type="checkbox" bind:checked={values[f.key] as boolean} />
-            {:else if f.secret}
-              <input
-                type="password"
-                placeholder={f.hasValue ? "•••••••• (set)" : "not set"}
-                bind:value={values[f.key]}
-                autocomplete="off"
-              />
-            {:else}
-              <input type={f.type === "number" ? "number" : "text"} bind:value={values[f.key]} />
-            {/if}
-            {#if f.help}<span class="help">{f.help}</span>{/if}
-          </label>
+          {#if f.type === "section"}
+            <div class="section-header">{f.label}</div>
+          {:else}
+            <label class="field" class:field--icon={f.type === "boolean" && f.icon}>
+              {#if f.type === "boolean" && f.icon}
+                <img src={f.icon} alt={f.label} class="field-icon" />
+              {/if}
+              <span class="flabel">{f.label}</span>
+              {#if f.type === "boolean"}
+                <input type="checkbox" bind:checked={values[f.key] as boolean} />
+              {:else if f.secret}
+                <input
+                  type="password"
+                  placeholder={f.hasValue ? "•••••••• (set)" : "not set"}
+                  bind:value={values[f.key]}
+                  autocomplete="off"
+                />
+              {:else}
+                <input type={f.type === "number" ? "number" : "text"} bind:value={values[f.key]} />
+              {/if}
+              {#if f.help}<span class="help">{f.help}</span>{/if}
+            </label>
+          {/if}
         {/each}
       </div>
       {#if fuelioAuthorizeUrl}
@@ -332,24 +339,31 @@
   {:else if connector.config.length}
     <div class="fields">
       {#each connector.config as f (f.key)}
-        <label class="field">
-          <span class="flabel">{f.label}</span>
-          {#if f.type === "boolean"}
-            <input type="checkbox" bind:checked={values[f.key] as boolean} />
-          {:else if f.secret}
-            <input
-              type="password"
-              placeholder={f.hasValue ? "•••••••• (set)" : "not set"}
-              bind:value={values[f.key]}
-              autocomplete="off"
-            />
-          {:else}
-            <input type={f.type === "number" ? "number" : "text"} bind:value={values[f.key]} />
-          {/if}
-          {#if f.help}<span class="help">{f.help}</span>{/if}
-        </label>
-      {/each}
-    </div>
+       {#if f.type === "section"}
+         <div class="section-header">{f.label}</div>
+       {:else}
+         <label class="field" class:field--icon={f.type === "boolean" && f.icon}>
+           {#if f.type === "boolean" && f.icon}
+             <img src={f.icon} alt={f.label} class="field-icon" />
+           {/if}
+           <span class="flabel">{f.label}</span>
+           {#if f.type === "boolean"}
+             <input type="checkbox" bind:checked={values[f.key] as boolean} />
+           {:else if f.secret}
+             <input
+               type="password"
+               placeholder={f.hasValue ? "•••••••• (set)" : "not set"}
+               bind:value={values[f.key]}
+               autocomplete="off"
+             />
+           {:else}
+             <input type={f.type === "number" ? "number" : "text"} bind:value={values[f.key]} />
+           {/if}
+           {#if f.help}<span class="help">{f.help}</span>{/if}
+         </label>
+       {/if}
+     {/each}
+   </div>
   {/if}
 
   <div class="row">
@@ -470,6 +484,43 @@
     display: flex;
     flex-direction: column;
     gap: 5px;
+  }
+  .field--icon {
+    flex-direction: row;
+    align-items: center;
+    gap: var(--s2);
+    padding: 8px 10px;
+    border-radius: var(--r-sm);
+    background: var(--surface);
+    border: 1px solid var(--border-strong);
+  }
+  .field--icon .field-icon {
+    width: 20px;
+    height: 20px;
+    object-fit: contain;
+    flex-shrink: 0;
+    opacity: 0.8;
+  }
+  .field--icon .flabel {
+    flex: 1;
+    margin: 0;
+    font-size: 13px;
+  }
+  .field--icon input[type="checkbox"] {
+    flex-shrink: 0;
+    width: 18px;
+    height: 18px;
+    cursor: pointer;
+  }
+  .section-header {
+    grid-column: 1 / -1;
+    margin-top: var(--s2);
+    margin-bottom: var(--s1);
+    font-size: 11.5px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-dim);
   }
   .flabel {
     font-size: 12px;

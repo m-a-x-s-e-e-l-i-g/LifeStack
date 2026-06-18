@@ -63,7 +63,7 @@ export interface Widget {
 export interface ConfigField {
   key: string;
   label: string;
-  type: "text" | "password" | "number" | "boolean";
+  type: "text" | "password" | "number" | "boolean" | "section";
   default?: string | number | boolean;
   help?: string;
   /** Treat as secret: never return the value over the API, only whether it is set. */
@@ -72,6 +72,8 @@ export interface ConfigField {
   optional?: boolean;
   /** Environment variable used as a fallback default. */
   env?: string;
+  /** Icon URL for visual branding (used for boolean toggles with provider logos). */
+  icon?: string;
 }
 
 export interface SyncResult {
@@ -88,11 +90,13 @@ export interface Connector {
   id: string;
   name: string;
   description: string;
-  kind: "api" | "import" | "manual";
+  kind: "api" | "import" | "manual" | "oauth";
   /** Optional inline SVG brand mark (uses currentColor where possible). */
   icon?: string;
   configSchema?: ConfigField[];
   syncIntervalMinutes?: number;
+  /** Set to true if this connector requires OAuth authorization via authorize(). */
+  hasAuthorize?: boolean;
   sync?: (ctx: ConnectorContext) => Promise<SyncResult>;
   /** Optional explicit auth step (e.g. OAuth PIN exchange) separate from data sync. */
   authorize?: (ctx: ConnectorContext, input: Record<string, unknown>) => Promise<SyncResult>;

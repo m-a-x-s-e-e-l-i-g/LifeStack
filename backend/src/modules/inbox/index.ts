@@ -16,7 +16,7 @@ const EUR_PER_UNIT: Record<string, number> = {
   HUF: 0.0025,
 };
 
-type ProviderKind = "mobility" | "food";
+type ProviderKind = "mobility" | "food" | "groceries";
 
 interface Candidate {
   kind: ProviderKind;
@@ -30,6 +30,7 @@ interface Candidate {
   durationMin: number;
   type: string;
   merchant: string;
+  itemsCount?: number;
 }
 
 function toNum(v: string): number {
@@ -166,11 +167,35 @@ function detectCandidates(
       merchant,
     });
 
+  const maybeGroceries = (provider: string) => {
+    const itemsMatch = text.match(/(\d+)\s*(?:item|artikel|product|artikel)/i);
+    out.push({
+      kind: "groceries",
+      provider,
+      messageId,
+      day,
+      startedAt,
+      amount: amount.amount,
+      currency: amount.currency,
+      distanceKm: 0,
+      durationMin: 0,
+      type: "",
+      merchant: provider,
+      itemsCount: itemsMatch ? Math.round(toNum(itemsMatch[1])) : 0,
+    });
+  };
+
   if (enabled(cfg, "scanUberEats", true) && (lower.includes("uber eats") || lower.includes("ubereats"))) {
     maybeFood("Uber Eats");
   }
   if (enabled(cfg, "scanThuisbezorgd", true) && (lower.includes("thuisbezorgd") || lower.includes("takeaway.com"))) {
     maybeFood("Thuisbezorgd");
+  }
+  if (enabled(cfg, "scanAlbertHeijn", true) && (lower.includes("albert heijn") || lower.includes("ah.nl"))) {
+    maybeGroceries("Albert Heijn");
+  }
+  if (enabled(cfg, "scanJumbo", true) && lower.includes("jumbo")) {
+    maybeGroceries("Jumbo");
   }
   if (enabled(cfg, "scanLime", true) && lower.includes("lime")) {
     const type = lower.includes("bike") ? "bike" : "scooter";
@@ -201,14 +226,75 @@ async function existingDedupe(ctx: ConnectorContext, keys: string[]): Promise<Se
   return seen;
 }
 
+const PROVIDER_TOGGLES = [
+  { key: "scanUber", label: "Scan Uber rides", icon: "https://upload.wikimedia.org/wikipedia/commons/thumb/5/58/Uber_logo_2018.svg/1024px-Uber_logo_2018.svg.png" },
+  { key: "scanLime", label: "Scan Lime rides", icon: "https://upload.wikimedia.org/wikipedia/commons/thumb/c/c3/Lime_logo.svg/1024px-Lime_logo.svg.png" },
+  { key: "scanBolt", label: "Scan Bolt rides", icon: "https://upload.wikimedia.org/wikipedia/commons/thumb/3/33/Bolt_%28company%29_logo.svg/1024px-Bolt_%28company%29_logo.svg.png" },
+  { key: "scanThuisbezorgd", label: "Scan Thuisbezorgd orders", icon: "https://upload.wikimedia.org/wikipedia/commons/thumb/a/a9/Thuisbezorgd.svg/1024px-Thuisbezorgd.svg.png" },
+  { key: "scanUberEats", label: "Scan Uber Eats orders", icon: "https://upload.wikimedia.org/wikipedia/commons/thumb/1/1c/Uber_Eats.svg/1024px-Uber_Eats.svg.png" },
+  { key: "scanAlbertHeijn", label: "Scan Albert Heijn receipts", icon: "https://upload.wikimedia.org/wikipedia/commons/thumb/1/1c/Albert_Heijn_logo.svg/1024px-Albert_Heijn_logo.svg.png" },
+  { key: "scanJumbo", label: "Scan Jumbo receipts", icon: "https://upload.wikimedia.org/wikipedia/commons/thumb/c/cc/Jumbo_supermarkt_logo.svg/1024px-Jumbo_supermarkt_logo.svg.png" },
+];
+
+const gmailConnector: Connector = {
+  id: "gmail",
+  name: "Gmail",
+  description: "Auto-scan your Gmail inbox for receipts and auto-import them.",
+  kind: "oauth",
+  syncIntervalMinutes: 30,
+  hasAuthorize: true,
+  configSchema: [
+    ...PROVIDER_TOGGLES.map((p) => ({ key: p.key, label: p.label, type: "boolean" as const, default: true, icon: p.icon })),
+  ],
+  async authorize(ctx, input) {
+    if (input.disconnect) {
+      await ctx.saveConfig({ gmailAccessToken: "", gmailRefreshToken: "" });
+      return { message: "Disconnected from Gmail." };
+    }
+    throw new Error("Gmail OAuth setup required in config.");
+  },
+  async sync(ctx) {
+    const token = String(ctx.config.gmailAccessToken ?? "").trim();
+    if (!token) throw new Error("Connect Gmail first.");
+    // TODO: Implement Gmail API sync using token
+    throw new Error("Gmail API sync not yet implemented. Use Mailbox (IMAP) for now.");
+  },
+};
+
+const outlookConnector: Connector = {
+  id: "outlook",
+  name: "Outlook",
+  description: "Auto-scan your Outlook inbox for receipts and auto-import them.",
+  kind: "oauth",
+  syncIntervalMinutes: 30,
+  hasAuthorize: true,
+  configSchema: [
+    ...PROVIDER_TOGGLES.map((p) => ({ key: p.key, label: p.label, type: "boolean" as const, default: true, icon: p.icon })),
+  ],
+  async authorize(ctx, input) {
+    if (input.disconnect) {
+      await ctx.saveConfig({ outlookAccessToken: "", outlookRefreshToken: "" });
+      return { message: "Disconnected from Outlook." };
+    }
+    throw new Error("Outlook OAuth setup required in config.");
+  },
+  async sync(ctx) {
+    const token = String(ctx.config.outlookAccessToken ?? "").trim();
+    if (!token) throw new Error("Connect Outlook first.");
+    // TODO: Implement Outlook API sync using token
+    throw new Error("Outlook API sync not yet implemented. Use Mailbox (IMAP) for now.");
+  },
+};
+
 const mailReceipts: Connector = {
   id: "mail-receipts",
-  name: "Mailbox receipts",
+  name: "Mailbox (advanced)",
   description:
-    "Connect your mailbox and auto-scan receipts for mobility and food providers (Uber, Lime, Bolt, Thuisbezorgd, Uber Eats).",
+    "Connect any mailbox via IMAP and auto-scan for receipts. For custom mail servers or advanced configuration.",
   kind: "api",
   syncIntervalMinutes: 30,
   configSchema: [
+    { key: "section_advanced", label: "IMAP Connection", type: "section" as const },
     { key: "imapHost", label: "IMAP host", type: "text", default: "imap.gmail.com" },
     { key: "imapPort", label: "IMAP port", type: "number", default: 993 },
     { key: "imapSecure", label: "Use TLS", type: "boolean", default: true },
@@ -217,11 +303,8 @@ const mailReceipts: Connector = {
     { key: "mailbox", label: "Folder", type: "text", default: "INBOX" },
     { key: "scanDays", label: "Look back days", type: "number", default: 14 },
     { key: "maxMessages", label: "Max emails per sync", type: "number", default: 400 },
-    { key: "scanUber", label: "Scan Uber rides", type: "boolean", default: true },
-    { key: "scanLime", label: "Scan Lime rides", type: "boolean", default: true },
-    { key: "scanBolt", label: "Scan Bolt rides", type: "boolean", default: true },
-    { key: "scanThuisbezorgd", label: "Scan Thuisbezorgd orders", type: "boolean", default: true },
-    { key: "scanUberEats", label: "Scan Uber Eats orders", type: "boolean", default: true },
+    { key: "section_providers", label: "Receipt scanning", type: "section" as const },
+    ...PROVIDER_TOGGLES.map((p) => ({ key: p.key, label: p.label, type: "boolean" as const, default: true, icon: p.icon })),
   ],
   async sync(ctx) {
     const host = String(ctx.config.imapHost ?? "").trim();
@@ -245,6 +328,7 @@ const mailReceipts: Connector = {
 
     const mobilityRows: Record<string, unknown>[] = [];
     const foodRows: Record<string, unknown>[] = [];
+    const groceryRows: Record<string, unknown>[] = [];
     const seenRows: Record<string, unknown>[] = [];
     let scanned = 0;
 
@@ -295,6 +379,18 @@ const mailReceipts: Connector = {
               cost_currency: currency,
               cost_eur: toEur(cost, currency),
             });
+          } else if (c.kind === "groceries") {
+            const amount = round2(c.amount);
+            const currency = normCurrency(c.currency);
+            groceryRows.push({
+              day: c.day,
+              message_id: c.messageId,
+              store: c.provider,
+              amount,
+              currency,
+              cost_eur: toEur(amount, currency),
+              items_count: c.itemsCount ?? 0,
+            });
           } else {
             foodRows.push({
               day: c.day,
@@ -328,11 +424,12 @@ const mailReceipts: Connector = {
 
     if (mobilityRows.length > 0) await ctx.db.insert("mobility_ride", mobilityRows);
     if (foodRows.length > 0) await ctx.db.insert("food_order", foodRows);
+    if (groceryRows.length > 0) await ctx.db.insert("grocery_receipt", groceryRows);
     if (seenRows.length > 0) await ctx.db.insert("inbox_receipt_seen", seenRows);
 
     return {
-      inserted: mobilityRows.length + foodRows.length,
-      message: `Scanned ${scanned} email(s), inserted ${mobilityRows.length} mobility and ${foodRows.length} food entries.`,
+      inserted: mobilityRows.length + foodRows.length + groceryRows.length,
+      message: `Scanned ${scanned} email(s), inserted ${mobilityRows.length} mobility, ${foodRows.length} food, and ${groceryRows.length} grocery entries.`,
     };
   },
 };
@@ -353,7 +450,7 @@ const inbox: LifeStackModule = {
        created_at DateTime
      ) ENGINE = ReplacingMergeTree ORDER BY (provider, dedupe_key)`,
   ],
-  connectors: [mailReceipts],
+  connectors: [gmailConnector, outlookConnector, mailReceipts],
   widgets: [
     {
       id: "scanned-total",

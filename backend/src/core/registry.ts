@@ -295,6 +295,7 @@ export async function configView(m: LifeStackModule, c: Connector) {
       secret: !!f.secret,
       hasValue,
       value: f.secret ? undefined : (value ?? f.default ?? ""),
+      ...(f.icon && { icon: f.icon }),
     };
   });
 }
@@ -309,7 +310,7 @@ export async function connectorView(m: LifeStackModule, c: Connector) {
     icon: c.icon ?? null,
     enabled: await isConnectorEnabled(m.id, c.id),
     hasSync: !!c.sync,
-    hasAuthorize: !!c.authorize,
+    hasAuthorize: c.hasAuthorize ?? !!c.authorize,
     hasImport: !!c.import,
     syncIntervalMinutes: c.syncIntervalMinutes ?? null,
     config: await configView(m, c),

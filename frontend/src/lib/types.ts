@@ -122,18 +122,19 @@ export interface TableData {
 export interface ConfigField {
   key: string;
   label: string;
-  type: "text" | "password" | "number" | "boolean";
+  type: "text" | "password" | "number" | "boolean" | "section";
   help: string | null;
   secret: boolean;
   hasValue: boolean;
   value?: string | number | boolean;
+  icon?: string;
 }
 
 export interface ConnectorView {
   id: string;
   name: string;
   description: string;
-  kind: "api" | "import" | "manual";
+  kind: "api" | "import" | "manual" | "oauth";
   icon: string | null;
   enabled: boolean;
   hasSync: boolean;
