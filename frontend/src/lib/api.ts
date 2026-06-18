@@ -15,7 +15,9 @@ export async function action<T = unknown>(
       const data = await res.json();
       if (data?.error) message = data.error;
     } catch {
-      // keep default message
+      const raw = await res.text().catch(() => "");
+      const snippet = raw.trim().slice(0, 240);
+      if (snippet) message = snippet;
     }
     throw new Error(message);
   }

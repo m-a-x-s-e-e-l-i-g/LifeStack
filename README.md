@@ -277,7 +277,9 @@ All configuration is environment variables (see `.env.example`):
 | `AI_MODEL`           | empty                       | Model name (e.g. `gpt-4o-mini`, `llama3.1`) |
 | `AI_API_KEY`         | empty                       | API key (optional for local models) |
 | `BACKEND_PORT`       | `4000`                      | Backend API port |
+| `BACKEND_BODY_LIMIT_MB` | `400`                    | Max backend request body size in MB (chat screenshot uploads) |
 | `FRONTEND_PORT`      | `3000`                      | Frontend port |
+| `FRONTEND_BODY_SIZE_LIMIT` | `50M`                 | SvelteKit request body limit (uploads through `/api/*`) |
 | `BACKEND_URL`        | `http://backend:4000`       | Internal URL frontend uses |
 | `ORIGIN`             | `http://localhost:3000`     | Public origin (CSRF) |
 | `TRAKT_CLIENT_ID` / `TRAKT_CLIENT_SECRET` | empty | Movies & TV: Trakt app credentials (see [Connecting Trakt](#connecting-trakt)) |

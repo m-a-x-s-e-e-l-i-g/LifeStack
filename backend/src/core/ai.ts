@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { client, command, getMeta, insert, query, setMeta } from "../db";
 import { env } from "../env";
 import { logger } from "../logger";
@@ -157,6 +157,16 @@ export interface ChatStep {
   error: string | null;
 }
 
+export interface PendingChange {
+  id: string;
+  kind: "write_records" | "delete_records" | "update_records";
+  target: WriteTarget;
+  rows?: unknown[];
+  where?: unknown;
+  updates?: Record<string, unknown>;
+  summary: string;
+}
+
 interface ModelMessage {
   role: string;
   content: unknown;
@@ -237,13 +247,46 @@ function normalizeProviderName(value: unknown): string {
   return raw;
 }
 
+function normalizeCurrencyCode(value: unknown, fallback = "EUR"): string {
+  const raw = String(value ?? "")
+    .trim()
+    .toUpperCase();
+  if (!raw) return fallback;
+  if (raw === "CZECH KORUNA" || raw === "CZECH KORUNAS" || raw === "CZECH CROWN" || raw === "CZECH CROWNS")
+    return "CZK";
+  if (raw === "KČ" || raw === "KC" || raw === "CZK") return "CZK";
+  if (raw === "€" || raw === "EUR") return "EUR";
+  if (raw === "$" || raw === "USD") return "USD";
+  if (raw === "£" || raw === "GBP") return "GBP";
+  if (raw === "ZŁ" || raw === "PLN") return "PLN";
+  return /^[A-Z]{3}$/.test(raw) ? raw : fallback;
+}
+
+const EUR_PER_UNIT: Record<string, number> = {
+  EUR: 1,
+  CZK: 0.0402,
+  USD: 0.93,
+  GBP: 1.18,
+  PLN: 0.235,
+  CHF: 1.04,
+  SEK: 0.086,
+  NOK: 0.086,
+  DKK: 0.134,
+  HUF: 0.0025,
+};
+
+function toEur(amount: number, currency: string): number {
+  const rate = EUR_PER_UNIT[currency] ?? 1;
+  return Math.round(amount * rate * 100) / 100;
+}
+
 function normalizeRideType(rawType: unknown, provider: string): string {
   const t = String(rawType ?? "").trim().toLowerCase();
   const p = provider.toLowerCase();
+  if (t.includes("bike") || t.includes("bicycle") || t.includes("cycle")) return "bike";
   if (p.includes("lime") || p.includes("tier") || p.includes("bird") || t.includes("scooter"))
     return "scooter";
   if (p.includes("uber") || p.includes("bolt") || p.includes("lyft")) return "taxi";
-  if (t.includes("bike") || t.includes("bicycle") || t.includes("cycle")) return "bike";
   if (t.includes("taxi") || t.includes("cab") || t.includes("car") || t.includes("ride"))
     return "taxi";
   return t || "ride";
@@ -261,14 +304,23 @@ function stableHash(target: WriteTarget, row: Record<string, unknown>): string {
 function normalizeRow(target: WriteTarget, raw: Record<string, unknown>): Record<string, unknown> {
   if (target === "mobility_ride") {
     const provider = normalizeProviderName(raw.provider ?? raw.app ?? raw.service);
-    return {
+    const startedAt = raw.started_at ?? raw.startedAt ?? raw.timestamp ?? raw.time;
+    const originalCost = num(raw.cost ?? raw.amount ?? raw.price);
+    const costCurrency = normalizeCurrencyCode(raw.cost_currency ?? raw.currency ?? raw.currency_code);
+    const row: Record<string, unknown> = {
       day: day(raw.day ?? raw.date),
       provider,
       type: normalizeRideType(raw.type ?? raw.vehicle, provider),
       distance_km: num(raw.distance_km ?? raw.distance ?? raw.km),
       duration_min: int(raw.duration_min ?? raw.duration ?? raw.minutes),
-      cost: num(raw.cost ?? raw.amount ?? raw.price),
+      cost: originalCost,
+      cost_currency: costCurrency,
+      cost_eur: toEur(originalCost, costCurrency),
     };
+    if (startedAt !== undefined && startedAt !== null && String(startedAt).trim()) {
+      row.started_at = String(startedAt);
+    }
+    return row;
   }
   if (target === "finance_tx") {
     return {
@@ -382,7 +434,17 @@ async function writeRecords(
 }
 
 const DELETE_COLUMNS: Record<WriteTarget, string[]> = {
-  mobility_ride: ["day", "provider", "type", "distance_km", "duration_min", "cost"],
+  mobility_ride: [
+    "day",
+    "started_at",
+    "provider",
+    "type",
+    "distance_km",
+    "duration_min",
+    "cost",
+    "cost_currency",
+    "cost_eur",
+  ],
   finance_tx: ["day", "description", "category", "amount"],
   fuel_fillup: ["day", "liters", "price_per_liter", "cost", "odometer"],
   energy_reading: ["day", "day_kwh", "night_kwh", "cost"],
@@ -476,6 +538,73 @@ async function deleteRecords(
   };
 }
 
+async function updateRecords(
+  target: WriteTarget,
+  whereRaw: unknown,
+  updatesRaw: unknown,
+): Promise<Record<string, unknown>> {
+  const where = whereSqlForTarget(target, whereRaw);
+
+  // Validate and normalize updates
+  if (!updatesRaw || typeof updatesRaw !== "object" || Array.isArray(updatesRaw)) {
+    throw new Error("updates must be an object");
+  }
+  const allowed = new Set(DELETE_COLUMNS[target]);
+  const updates = updatesRaw as Record<string, unknown>;
+  const setClauses: string[] = [];
+
+  for (const [k, v] of Object.entries(updates)) {
+    if (!allowed.has(k)) throw new Error(`Unsupported update column: ${k}`);
+    setClauses.push(`${k} = ${lit(v)}`);
+  }
+
+  if (setClauses.length === 0) {
+    return {
+      target,
+      matched: 0,
+      updateScheduled: false,
+      message: "No valid columns to update.",
+    };
+  }
+
+  // Find matching rows before update
+  const matched = await query<{ c: number }>(
+    `SELECT count() AS c FROM ${target} WHERE ${where}`,
+  );
+  const matchedCount = matched[0]?.c ?? 0;
+  if (matchedCount === 0) {
+    return {
+      target,
+      matched: 0,
+      updateScheduled: false,
+      message: "No rows matched the update filter.",
+    };
+  }
+
+  // Execute the update
+  const setClause = setClauses.join(", ");
+  await command(`ALTER TABLE ${target} UPDATE ${setClause} WHERE ${where}`);
+
+  return {
+    target,
+    matched: matchedCount,
+    updateScheduled: true,
+    message: `Scheduled update for ${matchedCount} row(s) in ${target}.`,
+  };
+}
+
+export async function applyPendingChange(
+  change: PendingChange,
+): Promise<Record<string, unknown>> {
+  if (change.kind === "write_records") {
+    return writeRecords(change.target, Array.isArray(change.rows) ? change.rows : []);
+  }
+  if (change.kind === "update_records") {
+    return updateRecords(change.target, change.where, change.updates);
+  }
+  return deleteRecords(change.target, change.where);
+}
+
 const TOOLS = [
   {
     type: "function",
@@ -557,6 +686,43 @@ const TOOLS = [
       },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "update_records",
+      description:
+        "Update existing records in a local LifeStack table. Use when the user asks to change field values on existing entries.",
+      parameters: {
+        type: "object",
+        properties: {
+          target: {
+            type: "string",
+            enum: [
+              "mobility_ride",
+              "finance_tx",
+              "fuel_fillup",
+              "energy_reading",
+              "food_order",
+            ],
+            description: "Target local table.",
+          },
+          where: {
+            type: "object",
+            description:
+              "Equality filters to identify which records to update. Keys must be columns of the target table. At least one filter is required.",
+            additionalProperties: true,
+          },
+          updates: {
+            type: "object",
+            description:
+              "Field updates to apply. Keys must be columns of the target table, values are the new values.",
+            additionalProperties: true,
+          },
+        },
+        required: ["target", "where", "updates"],
+      },
+    },
+  },
 ];
 
 const MAX_ATTACHMENTS_PER_BATCH = 5;
@@ -574,8 +740,10 @@ Rules:
 - To get any number, call run_sql. Never invent values; if a query returns no rows, say the data is not there yet.
 - For screenshot imports, extract structured entries and call write_records with the correct target table and rows.
 - Food delivery screenshots (Uber Eats, takeaway.com, thuisbezorgd) should be written to food_order.
-- Mobility screenshots should normalize provider names (Uber, Bolt, Lime, Tier, Bird, Lyft) and set type to taxi, scooter, or bike.
-- Only modify data when the user explicitly asks, use write_records to add rows and delete_records to remove rows.
+- Mobility screenshots should normalize provider names (Uber, Bolt, Lime, Tier, Bird, Lyft) and set type to taxi, scooter, or bike. If the screenshot indicates bike/e-bike/cycle, keep it as bike even for Lime/Tier/Bird.
+- If a mobility screenshot includes an explicit ride time, store it as started_at.
+- Mobility cost must preserve the original amount in cost and original ISO currency in cost_currency (for example CZK, EUR, USD). Never assume EUR when a non-EUR currency is shown.
+- Only modify data when the user explicitly asks. Use write_records to add new rows, update_records to change specific field values on existing entries (e.g., if user says "this should be Uber instead"), and delete_records to remove rows entirely. For updates, use the most specific identifying fields in the WHERE clause (e.g., day + started_at for mobility_ride) to target exactly the record the user refers to.
 - ClickHouse dialect: use today(), now(), toStartOfMonth(x), toYYYYMM(x), formatDateTime(x, '%b'), countIf(cond), sumIf(x, cond), uniqExact(x), arrayJoin(arr). Date math uses INTERVAL, e.g. today() - INTERVAL 12 MONTH.
 - Tables holding deduplicated entities use ReplacingMergeTree; add FINAL after the table name (e.g. FROM watch_history FINAL) so re-synced rows are not double counted.
 - Keep queries focused and always include a LIMIT for row listings.
@@ -655,7 +823,12 @@ function toUserContent(m: ChatMessage): unknown {
 
 export async function chat(
   incoming: ChatMessage[],
-): Promise<{ reply: string; steps: ChatStep[]; configured: boolean }> {
+): Promise<{
+  reply: string;
+  steps: ChatStep[];
+  configured: boolean;
+  pendingActions?: PendingChange[];
+}> {
   const cfg = await aiConfig();
   if (!cfg.baseUrl || !cfg.model) {
     return {
@@ -669,7 +842,7 @@ export async function chat(
   async function runConversation(
     messages: ChatMessage[],
     allowSplitOnImageError = false,
-  ): Promise<{ reply: string; steps: ChatStep[] }> {
+  ): Promise<{ reply: string; steps: ChatStep[]; pendingActions?: PendingChange[] }> {
     const schema = await schemaSummary();
     const convo: unknown[] = [
       { role: "system", content: systemPrompt(schema) },
@@ -682,6 +855,7 @@ export async function chat(
     ];
 
     const steps: ChatStep[] = [];
+    const pendingActions: PendingChange[] = [];
     const hasImages = messages.some(
       (m) => m.role === "user" && Array.isArray(m.attachments) && m.attachments.length > 0,
     );
@@ -744,6 +918,7 @@ export async function chat(
             target?: WriteTarget;
             rows?: unknown[];
             where?: unknown;
+            updates?: Record<string, unknown>;
           };
           if (call.function.name === "run_sql") {
             stepSql = String(args.sql ?? "");
@@ -763,10 +938,18 @@ export async function chat(
             ) {
               throw new Error("Unsupported write target");
             }
-            const result = await writeRecords(target, Array.isArray(args.rows) ? args.rows : []);
-            stepSql = `write_records(${target})`;
-            stepRows = [result];
-            content = JSON.stringify(result);
+            const rows = Array.isArray(args.rows) ? args.rows : [];
+            const change: PendingChange = {
+              id: randomUUID(),
+              kind: "write_records",
+              target,
+              rows,
+              summary: `Import ${rows.length} row${rows.length === 1 ? "" : "s"} into ${target}`,
+            };
+            pendingActions.push(change);
+            stepSql = `pending write_records(${target})`;
+            stepRows = [{ pending: true, ...change }];
+            content = JSON.stringify(change);
           } else if (call.function.name === "delete_records") {
             const target = String(args.target ?? "") as WriteTarget;
             if (
@@ -780,10 +963,43 @@ export async function chat(
             ) {
               throw new Error("Unsupported delete target");
             }
-            const result = await deleteRecords(target, args.where);
-            stepSql = `delete_records(${target})`;
-            stepRows = [result];
-            content = JSON.stringify(result);
+            const change: PendingChange = {
+              id: randomUUID(),
+              kind: "delete_records",
+              target,
+              where: args.where,
+              summary: `Delete matching rows from ${target}`,
+            };
+            pendingActions.push(change);
+            stepSql = `pending delete_records(${target})`;
+            stepRows = [{ pending: true, ...change }];
+            content = JSON.stringify(change);
+          } else if (call.function.name === "update_records") {
+            const target = String(args.target ?? "") as WriteTarget;
+            if (
+              ![
+                "mobility_ride",
+                "finance_tx",
+                "fuel_fillup",
+                "energy_reading",
+                "food_order",
+              ].includes(target)
+            ) {
+              throw new Error("Unsupported update target");
+            }
+            const updates = args.updates ?? {};
+            const change: PendingChange = {
+              id: randomUUID(),
+              kind: "update_records",
+              target,
+              where: args.where,
+              updates,
+              summary: `Update matching rows in ${target}`,
+            };
+            pendingActions.push(change);
+            stepSql = `pending update_records(${target})`;
+            stepRows = [{ pending: true, ...change }];
+            content = JSON.stringify(change);
           } else {
             throw new Error(`Unsupported tool: ${call.function.name}`);
           }
@@ -793,6 +1009,14 @@ export async function chat(
         }
         steps.push({ sql: stepSql, rows: stepRows, error: stepError });
         convo.push({ role: "tool", tool_call_id: call.id, content });
+      }
+
+      if (pendingActions.length > 0) {
+        return {
+          reply: `I prepared ${pendingActions.length} change${pendingActions.length === 1 ? "" : "s"} for approval.`,
+          steps,
+          pendingActions,
+        };
       }
     }
 
@@ -820,6 +1044,7 @@ export async function chat(
     skippedDuplicates: number;
     rejected: number;
     failedBatches: number;
+    pendingActions: PendingChange[];
   }
 
   async function processBatch(batchAttachments: ChatAttachment[]): Promise<BatchResult> {
@@ -835,6 +1060,7 @@ export async function chat(
         skippedDuplicates: summary.skippedDuplicates,
         rejected: summary.rejected,
         failedBatches: 0,
+        pendingActions: result.pendingActions ?? [],
       };
     } catch (err) {
       if (batchAttachments.length > 1 && isBatchableImageError(err)) {
@@ -847,6 +1073,7 @@ export async function chat(
           skippedDuplicates: left.skippedDuplicates + right.skippedDuplicates,
           rejected: left.rejected + right.rejected,
           failedBatches: left.failedBatches + right.failedBatches,
+          pendingActions: [...left.pendingActions, ...right.pendingActions],
         };
       }
       const message = err instanceof Error ? err.message : String(err);
@@ -856,6 +1083,7 @@ export async function chat(
         skippedDuplicates: 0,
         rejected: 0,
         failedBatches: 1,
+        pendingActions: [],
       };
     }
   }
@@ -876,6 +1104,16 @@ export async function chat(
   const totalSkipped = results.reduce((n, r) => n + r.skippedDuplicates, 0);
   const totalRejected = results.reduce((n, r) => n + r.rejected, 0);
   const failedBatches = results.reduce((n, r) => n + r.failedBatches, 0);
+  const pendingActions = results.flatMap((r) => r.pendingActions);
+
+  if (pendingActions.length > 0) {
+    return {
+      configured: true,
+      steps: allSteps,
+      pendingActions,
+      reply: `I prepared ${pendingActions.length} change${pendingActions.length === 1 ? "" : "s"} for approval.`,
+    };
+  }
 
   const reply =
     `Processed ${attachments.length} screenshots in ${batches.length} batch${batches.length === 1 ? "" : "es"}. ` +

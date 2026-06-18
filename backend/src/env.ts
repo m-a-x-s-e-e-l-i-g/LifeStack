@@ -4,6 +4,7 @@ export const env = {
   CLICKHOUSE_USER: process.env.CLICKHOUSE_USER ?? "lifestack",
   CLICKHOUSE_PASSWORD: process.env.CLICKHOUSE_PASSWORD ?? "lifestack",
   PORT: Number(process.env.BACKEND_PORT ?? 4000),
+  BACKEND_BODY_LIMIT_MB: Math.max(1, Number(process.env.BACKEND_BODY_LIMIT_MB ?? 400)),
   LOG_LEVEL: (process.env.LOG_LEVEL ?? "info") as
     | "debug"
     | "info"

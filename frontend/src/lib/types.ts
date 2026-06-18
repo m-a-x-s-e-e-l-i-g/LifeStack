@@ -2,6 +2,7 @@ export type WidgetType =
   | "metric"
   | "statpanel"
   | "split"
+  | "cards"
   | "bar"
   | "line"
   | "donut"
@@ -68,6 +69,22 @@ export interface SplitPart {
 export interface SplitData {
   parts: SplitPart[];
 }
+export interface CardsItem {
+  label: string;
+  rides: number;
+  distance_km: number;
+  cost: number;
+  avg_cost?: number;
+  bike_rides?: number;
+  bike_km?: number;
+  scooter_rides?: number;
+  scooter_km?: number;
+  taxi_rides?: number;
+  taxi_km?: number;
+}
+export interface CardsData {
+  cards: CardsItem[];
+}
 export interface SeriesPoint {
   label: string;
   value: number;
@@ -120,6 +137,7 @@ export interface ConnectorView {
   icon: string | null;
   enabled: boolean;
   hasSync: boolean;
+  hasAuthorize?: boolean;
   hasImport: boolean;
   syncIntervalMinutes: number | null;
   config: ConfigField[];
@@ -161,8 +179,19 @@ export interface ChatStep {
   error: string | null;
 }
 
+export interface PendingChange {
+  id: string;
+  kind: "write_records" | "delete_records" | "update_records";
+  target: string;
+  rows?: unknown[];
+  where?: unknown;
+  updates?: Record<string, unknown>;
+  summary: string;
+}
+
 export interface ChatResponse {
   reply: string;
   steps: ChatStep[];
   configured: boolean;
+  pendingActions?: PendingChange[];
 }

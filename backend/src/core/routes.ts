@@ -1,4 +1,5 @@
 import type { FastifyInstance, FastifyReply } from "fastify";
+import { command } from "../db";
 import type { Connector, LifeStackModule, ModuleContext, Widget } from "./types";
 import {
   allModules,
@@ -15,8 +16,27 @@ import {
   setConnectorEnabled,
   setModuleEnabled,
 } from "./registry";
-import { aiStatus, chat, setAiConfig, type ChatMessage } from "./ai";
+import { aiStatus, applyPendingChange, chat, setAiConfig, type ChatMessage, type PendingChange } from "./ai";
 import { triggerSync } from "./scheduler";
+
+function lit(value: unknown): string {
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  const s = String(value ?? "").replace(/'/g, "''");
+  return `'${s}'`;
+}
+
+const EUR_PER_UNIT: Record<string, number> = {
+  EUR: 1,
+  CZK: 0.0402,
+  USD: 0.93,
+  GBP: 1.18,
+  PLN: 0.235,
+  CHF: 1.04,
+  SEK: 0.086,
+  NOK: 0.086,
+  DKK: 0.134,
+  HUF: 0.0025,
+};
 
 function meta(m: LifeStackModule) {
   return {
@@ -248,6 +268,100 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       return reply
         .code(502)
         .send({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  app.post<{ Body: { change?: PendingChange } }>("/api/chat/approve", async (req, reply) => {
+    const change = req.body?.change;
+    if (!change) return reply.code(400).send({ error: "change is required" });
+    try {
+      return { ok: true, result: await applyPendingChange(change) };
+    } catch (err) {
+      return reply
+        .code(502)
+        .send({ ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  app.put<{
+    Body: {
+      original?: {
+        day?: string;
+        started_at?: string;
+        provider?: string;
+        type?: string;
+        distance_km?: number;
+        duration_min?: number;
+        cost?: number;
+        cost_currency?: string;
+      };
+      patch?: {
+        day?: string;
+        started_at?: string;
+        provider?: string;
+        type?: string;
+        distance_km?: number;
+        duration_min?: number;
+        cost?: number;
+        cost_currency?: string;
+      };
+    };
+  }>("/api/modules/mobility/rides/update", async (req, reply) => {
+    const original = req.body?.original;
+    const patch = req.body?.patch;
+    if (!original || !patch) {
+      return reply.code(400).send({ ok: false, error: "original and patch are required" });
+    }
+    const keys: Array<keyof typeof patch> = [
+      "day",
+      "started_at",
+      "provider",
+      "type",
+      "distance_km",
+      "duration_min",
+      "cost",
+      "cost_currency",
+    ];
+    const setClauses: string[] = [];
+    let nextCost = Number(original.cost ?? 0);
+    let nextCurrency = String(original.cost_currency ?? "EUR").toUpperCase();
+    for (const key of keys) {
+      const v = patch[key];
+      if (v === undefined || v === null || v === "") continue;
+      if (key === "distance_km" || key === "cost") {
+        const n = Number(v);
+        setClauses.push(`${key} = ${n}`);
+        if (key === "cost") nextCost = n;
+      }
+      else if (key === "duration_min") setClauses.push(`${key} = ${Math.round(Number(v))}`);
+      else if (key === "cost_currency") {
+        nextCurrency = String(v).toUpperCase();
+        setClauses.push(`${key} = ${lit(nextCurrency)}`);
+      }
+      else setClauses.push(`${key} = ${lit(v)}`);
+    }
+    const rate = EUR_PER_UNIT[nextCurrency] ?? 1;
+    setClauses.push(`cost_eur = ${Math.round(nextCost * rate * 100) / 100}`);
+    if (setClauses.length === 0) {
+      return reply.code(400).send({ ok: false, error: "No updates were provided" });
+    }
+    const where = [
+      `day = ${lit(original.day ?? "")}`,
+      `started_at = ${lit(original.started_at ?? "")}`,
+      `provider = ${lit(original.provider ?? "")}`,
+      `type = ${lit(original.type ?? "")}`,
+      `distance_km = ${Number(original.distance_km ?? 0)}`,
+      `duration_min = ${Math.round(Number(original.duration_min ?? 0))}`,
+      `cost = ${Number(original.cost ?? 0)}`,
+      `upperUTF8(cost_currency) = ${lit(String(original.cost_currency ?? "EUR").toUpperCase())}`,
+    ].join(" AND ");
+    try {
+      await command(`ALTER TABLE mobility_ride UPDATE ${setClauses.join(", ")} WHERE ${where}`);
+      return { ok: true, message: "Ride updated. Refreshing dashboard shortly." };
+    } catch (err) {
+      return reply
+        .code(502)
+        .send({ ok: false, error: err instanceof Error ? err.message : String(err) });
     }
   });
 }

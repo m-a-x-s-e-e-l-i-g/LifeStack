@@ -309,6 +309,7 @@ export async function connectorView(m: LifeStackModule, c: Connector) {
     icon: c.icon ?? null,
     enabled: await isConnectorEnabled(m.id, c.id),
     hasSync: !!c.sync,
+    hasAuthorize: !!c.authorize,
     hasImport: !!c.import,
     syncIntervalMinutes: c.syncIntervalMinutes ?? null,
     config: await configView(m, c),

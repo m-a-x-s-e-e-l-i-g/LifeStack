@@ -39,6 +39,7 @@ export type WidgetType =
   | "metric"
   | "statpanel"
   | "split"
+  | "cards"
   | "bar"
   | "line"
   | "donut"

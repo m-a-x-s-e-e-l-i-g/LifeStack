@@ -34,6 +34,32 @@
     return u.toString();
   });
 
+  const fuelioAuthorizeUrl = $derived.by(() => {
+    if (connector.id === "fuelio-dropbox") {
+      const id = String(values.clientId ?? "").trim();
+      if (!id) return null;
+      const u = new URL("https://www.dropbox.com/oauth2/authorize");
+      u.searchParams.set("response_type", "code");
+      u.searchParams.set("token_access_type", "offline");
+      u.searchParams.set("no_redirect", "1");
+      u.searchParams.set("client_id", id);
+      return u.toString();
+    }
+    if (connector.id === "fuelio-google-drive") {
+      const id = String(values.clientId ?? "").trim();
+      if (!id) return null;
+      const u = new URL("https://accounts.google.com/o/oauth2/v2/auth");
+      u.searchParams.set("response_type", "code");
+      u.searchParams.set("client_id", id);
+      u.searchParams.set("redirect_uri", "http://localhost");
+      u.searchParams.set("scope", "https://www.googleapis.com/auth/drive.readonly");
+      u.searchParams.set("access_type", "offline");
+      u.searchParams.set("prompt", "consent");
+      return u.toString();
+    }
+    return null;
+  });
+
   async function run(fn: () => Promise<void>, working = "Working…") {
     busy = true;
     status = working;
@@ -80,6 +106,7 @@
   const secretSet = $derived(!!cfgField("clientSecret")?.hasValue);
 
   let pin = $state("");
+  let authCode = $state("");
   let editCreds = $state(false);
   let reauth = $state(false);
 
@@ -113,6 +140,23 @@
         await action(`/modules/${moduleId}/connectors/${connector.id}/disable`);
       status = "Disconnected";
     }, "Disconnecting…");
+
+  const connectFuelio = () =>
+    run(async () => {
+      await action(`/modules/${moduleId}/connectors/${connector.id}/authorize`, "POST", { code: authCode });
+      if (!connector.enabled)
+        await action(`/modules/${moduleId}/connectors/${connector.id}/enable`);
+      authCode = "";
+      status = "Connected";
+    }, "Connecting…");
+
+  const disconnectFuelio = () =>
+    run(async () => {
+      await action(`/modules/${moduleId}/connectors/${connector.id}/authorize`, "POST", {
+        disconnect: true,
+      });
+      status = "Disconnected";
+    }, "Disconnecting…");
 </script>
 
 <div class="conn" class:on={connector.enabled} style="--accent: {accent}">
@@ -137,7 +181,9 @@
     </button>
   </div>
 
-  {#if connector.id === "trakt"}
+  {#if !connector.enabled}
+    <p class="disabled-note">Enable this connector to show configuration and connection details.</p>
+  {:else if connector.id === "trakt"}
     <div class="tk">
       {#snippet authLink()}
         {#if traktAuthorizeUrl}
@@ -236,6 +282,53 @@
         </div>
       {/if}
     </div>
+  {:else if connector.hasAuthorize && (connector.id === "fuelio-dropbox" || connector.id === "fuelio-google-drive")}
+    <div class="tk">
+      <p class="tk-hint">
+        Save credentials and file location first. Then authorize access and paste the returned code to connect.
+        Sync supports CSV and CSV.ZIP files, including multiple vehicle backups.
+      </p>
+      <div class="fields">
+        {#each connector.config as f (f.key)}
+          <label class="field">
+            <span class="flabel">{f.label}</span>
+            {#if f.type === "boolean"}
+              <input type="checkbox" bind:checked={values[f.key] as boolean} />
+            {:else if f.secret}
+              <input
+                type="password"
+                placeholder={f.hasValue ? "•••••••• (set)" : "not set"}
+                bind:value={values[f.key]}
+                autocomplete="off"
+              />
+            {:else}
+              <input type={f.type === "number" ? "number" : "text"} bind:value={values[f.key]} />
+            {/if}
+            {#if f.help}<span class="help">{f.help}</span>{/if}
+          </label>
+        {/each}
+      </div>
+      {#if fuelioAuthorizeUrl}
+        <div class="tk-authrow">
+          <a class="authlink" href={fuelioAuthorizeUrl} target="_blank" rel="noopener noreferrer">
+            Authorize
+            <span class="go" aria-hidden="true">&rarr;</span>
+          </a>
+          <button class="btn btn--ghost" onclick={save} disabled={busy}>Save config</button>
+        </div>
+      {/if}
+      <div class="tk-pin">
+        <input
+          class="tk-pininput"
+          placeholder="Paste authorization code"
+          bind:value={authCode}
+          autocomplete="off"
+          spellcheck="false"
+        />
+        <button class="btn" onclick={connectFuelio} disabled={busy || !authCode.trim()}>Connect</button>
+        <button class="btn btn--ghost tk-danger" onclick={disconnectFuelio} disabled={busy}>Disconnect</button>
+      </div>
+    </div>
   {:else if connector.config.length}
     <div class="fields">
       {#each connector.config as f (f.key)}
@@ -261,7 +354,7 @@
 
   <div class="row">
     <div class="left">
-      {#if connector.id !== "trakt"}
+      {#if connector.enabled && connector.id !== "trakt"}
         {#if connector.config.length}
           <button class="btn btn--ghost" onclick={save} disabled={busy}>Save config</button>
         {/if}
@@ -334,6 +427,11 @@
     font-size: 12.5px;
     color: var(--text-faint);
     max-width: 60ch;
+  }
+  .disabled-note {
+    margin: 0;
+    font-size: 12.5px;
+    color: var(--text-dim);
   }
 
   .switch {

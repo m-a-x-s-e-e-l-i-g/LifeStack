@@ -3,6 +3,7 @@
   import Metric from "./Metric.svelte";
   import StatPanel from "./StatPanel.svelte";
   import SplitMetric from "./SplitMetric.svelte";
+  import Cards from "./Cards.svelte";
   import BarChart from "./BarChart.svelte";
   import LineChart from "./LineChart.svelte";
   import DonutChart from "./DonutChart.svelte";
@@ -30,6 +31,8 @@
             !d.parts?.length ||
             d.parts.every((p: any) => p.value === undefined || p.value === null)
           );
+        case "cards":
+          return !d.cards?.length;
         case "bar":
         case "line":
           return !d.series?.length;
@@ -65,6 +68,8 @@
       <StatPanel data={d} {accent} />
     {:else if widget.type === "split"}
       <SplitMetric data={d} {accent} />
+    {:else if widget.type === "cards"}
+      <Cards data={d} {accent} />
     {:else if widget.type === "bar"}
       <BarChart data={d} {accent} />
     {:else if widget.type === "line"}

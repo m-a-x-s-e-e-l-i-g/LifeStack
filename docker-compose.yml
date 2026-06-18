@@ -61,6 +61,7 @@ services:
     environment:
       NODE_ENV: production
       PORT: ${FRONTEND_PORT:-3000}
+      BODY_SIZE_LIMIT: ${FRONTEND_BODY_SIZE_LIMIT:-50M}
       BACKEND_URL: ${BACKEND_URL:-http://backend:4000}
       ORIGIN: ${ORIGIN:-http://localhost:3000}
     ports:

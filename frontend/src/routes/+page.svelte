@@ -1,19 +1,25 @@
 <script lang="ts">
+  import { invalidateAll } from "$app/navigation";
   import type { PageData } from "./$types";
   import { page } from "$app/stores";
-  import { tick } from "svelte";
+  import { onMount, tick } from "svelte";
   import { action } from "$lib/api";
   import { display } from "$lib/format";
-  import type { ChatResponse, ChatStep, ModuleSummary } from "$lib/types";
+  import type { ChatResponse, ChatStep, ModuleSummary, PendingChange } from "$lib/types";
 
   let { data }: { data: PageData } = $props();
 
   type UploadImage = { name: string; mime: string; dataUrl: string };
+  const CHAT_STORAGE_KEY = "lifestack:assistant:thread:v1";
+  const MAX_PENDING_IMAGES = 50;
+  const MAX_IMAGE_SIDE_PX = 1280;
+  const IMAGE_QUALITY = 0.72;
   type Turn = {
     role: "user" | "assistant";
     content: string;
     steps?: ChatStep[];
-    attachments?: UploadImage[];
+    attachmentCount?: number;
+    pendingActions?: PendingChange[];
   };
 
   let thread = $state<Turn[]>([]);
@@ -24,6 +30,38 @@
   let box: HTMLTextAreaElement | null = $state(null);
   let picker: HTMLInputElement | null = $state(null);
   let pendingImages = $state<UploadImage[]>([]);
+  let persistenceReady = $state(false);
+
+  function isTurn(value: unknown): value is Turn {
+    return (
+      !!value &&
+      typeof value === "object" &&
+      ((value as { role?: unknown }).role === "user" ||
+        (value as { role?: unknown }).role === "assistant") &&
+      typeof (value as { content?: unknown }).content === "string"
+    );
+  }
+
+  onMount(() => {
+    try {
+      const raw = localStorage.getItem(CHAT_STORAGE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          thread = parsed.filter(isTurn);
+        }
+      }
+    } catch {
+      // Ignore malformed local state and start with an empty thread.
+    } finally {
+      persistenceReady = true;
+    }
+  });
+
+  $effect(() => {
+    if (!persistenceReady) return;
+    localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(thread));
+  });
 
   const modules = $derived((($page.data.modules ?? []) as ModuleSummary[]).filter((m) => m.enabled));
 
@@ -32,7 +70,7 @@
     finance: "What were my biggest spending categories last month?",
     energy: "Show my electricity cost by month this year.",
     fuel: "What is my average fuel economy in L/100km?",
-    mobility: "I uploaded an Uber receipt screenshot. Extract it and save it as mobility data.",
+    mobility: "I uploaded Lime scooter and bike receipt screenshots. Extract them and save them as mobility data.",
     food: "I uploaded an Uber Eats screenshot. Extract the order and save it as food_order data.",
   };
 
@@ -64,28 +102,69 @@
     });
   }
 
+  function imageNameAsJpeg(name: string): string {
+    const trimmed = name.trim();
+    if (!trimmed) return "upload.jpg";
+    return /\.[^./\\]+$/.test(trimmed) ? trimmed.replace(/\.[^./\\]+$/, ".jpg") : `${trimmed}.jpg`;
+  }
+
+  function loadImage(dataUrl: string): Promise<HTMLImageElement> {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => resolve(img);
+      img.onerror = () => reject(new Error("Could not decode image"));
+      img.src = dataUrl;
+    });
+  }
+
+  async function optimizeImage(file: File): Promise<UploadImage> {
+    const originalDataUrl = await readAsDataUrl(file);
+    const img = await loadImage(originalDataUrl);
+    const srcWidth = img.naturalWidth || img.width;
+    const srcHeight = img.naturalHeight || img.height;
+    const maxSide = Math.max(srcWidth, srcHeight);
+    const scale = maxSide > MAX_IMAGE_SIDE_PX ? MAX_IMAGE_SIDE_PX / maxSide : 1;
+    const width = Math.max(1, Math.round(srcWidth * scale));
+    const height = Math.max(1, Math.round(srcHeight * scale));
+
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return { name: file.name, mime: file.type || "image/*", dataUrl: originalDataUrl };
+    ctx.drawImage(img, 0, 0, width, height);
+    const dataUrl = canvas.toDataURL("image/jpeg", IMAGE_QUALITY);
+    return { name: imageNameAsJpeg(file.name), mime: "image/jpeg", dataUrl };
+  }
+
   async function addImages(list: FileList | null) {
     if (!list || !list.length || busy) return;
     const files = [...list].filter((f) => f.type.startsWith("image/"));
     if (files.length === 0) return;
-    const loaded: UploadImage[] = [];
-    for (const file of files.slice(0, 6)) {
-      const dataUrl = await readAsDataUrl(file);
-      loaded.push({ name: file.name, mime: file.type, dataUrl });
+    const remaining = MAX_PENDING_IMAGES - pendingImages.length;
+    if (remaining <= 0) {
+      if (picker) picker.value = "";
+      return;
     }
-    pendingImages = [...pendingImages, ...loaded].slice(0, 6);
+    const loaded: UploadImage[] = [];
+    for (const file of files.slice(0, remaining)) {
+      loaded.push(await optimizeImage(file));
+    }
+    pendingImages = [...pendingImages, ...loaded];
     if (picker) picker.value = "";
   }
 
-  function removeImage(ix: number) {
-    pendingImages = pendingImages.filter((_, i) => i !== ix);
+  function clearImages() {
+    pendingImages = [];
+    if (picker) picker.value = "";
   }
 
   async function send(text: string) {
     const content = text.trim();
     if ((!content && pendingImages.length === 0) || busy) return;
     errorText = null;
-    const userTurn: Turn = { role: "user", content, attachments: pendingImages };
+    const attachments = pendingImages;
+    const userTurn: Turn = { role: "user", content, attachmentCount: attachments.length };
     thread = [...thread, userTurn];
     input = "";
     pendingImages = [];
@@ -93,13 +172,20 @@
     busy = true;
     scrollDown();
     try {
-      const payload = thread.map((t) => ({
+      const history = thread.map((t) => ({
         role: t.role,
         content: t.content,
-        ...(t.role === "user" && t.attachments?.length ? { attachments: t.attachments } : {}),
       }));
+      const payload = [
+        ...history,
+        {
+          role: "user",
+          content,
+          ...(attachments.length ? { attachments } : {}),
+        },
+      ];
       const res = await action<ChatResponse>("/chat", "POST", { messages: payload });
-      thread = [...thread, { role: "assistant", content: res.reply, steps: res.steps }];
+      thread = [...thread, { role: "assistant", content: res.reply, steps: res.steps, pendingActions: res.pendingActions }];
     } catch (e) {
       errorText = e instanceof Error ? e.message : "The assistant could not respond.";
     } finally {
@@ -129,6 +215,103 @@
     if (typeof v === "number") return display(v);
     if (v === null || v === undefined) return "—";
     return String(v);
+  }
+
+  function escapeHtml(text: string): string {
+    return text
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;")
+      .replaceAll("'", "&#39;");
+  }
+
+  function renderMarkdown(text: string): string {
+    const escaped = escapeHtml(text);
+    const linked = escaped.replace(
+      /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
+      '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>',
+    );
+    const code = linked.replace(/`([^`]+)`/g, "<code>$1</code>");
+    const bold = code.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+    const italic = bold.replace(/\*([^*\n]+)\*/g, "<em>$1</em>");
+    return italic
+      .split(/\n{2,}/)
+      .map((block) => `<p>${block.replace(/\n/g, "<br>")}</p>`)
+      .join("");
+  }
+
+  function approvalPreview(change: PendingChange): {
+    title: string;
+    columns: string[];
+    rows: Record<string, unknown>[];
+    total: number;
+  } | null {
+    if (change.kind === "write_records") {
+      const rows = (Array.isArray(change.rows) ? change.rows : []).filter(
+        (row): row is Record<string, unknown> =>
+          !!row && typeof row === "object" && !Array.isArray(row),
+      );
+      if (!rows.length) return null;
+      const preview = rows.slice(0, 5);
+      const cols = [...new Set(preview.flatMap((row) => Object.keys(row)))];
+      return { title: "Rows to add", columns: cols, rows: preview, total: rows.length };
+    }
+    if (change.kind === "delete_records" && change.where && typeof change.where === "object") {
+      const where = change.where as Record<string, unknown>;
+      const rows = Object.entries(where).map(([field, value]) => ({
+        field,
+        value: Array.isArray(value) ? value.join(", ") : value,
+      }));
+      if (!rows.length) return null;
+      return { title: "Delete filters", columns: ["field", "value"], rows, total: rows.length };
+    }
+    return null;
+  }
+
+  function approvalMessage(result: unknown, fallback: string): string {
+    if (result && typeof result === "object") {
+      const msg = (result as { message?: unknown }).message;
+      if (typeof msg === "string" && msg.trim()) return msg.trim();
+    }
+    return fallback;
+  }
+
+  async function approveChange(turnIndex: number, change: PendingChange) {
+    if (busy) return;
+    busy = true;
+    errorText = null;
+    try {
+      const res = await action<{ ok: boolean; result?: unknown; error?: string }>("/chat/approve", "POST", {
+        change,
+      });
+      if (!res.ok) throw new Error(res.error ?? "Approval failed");
+      thread = thread.map((turn, i) =>
+        i === turnIndex
+          ? { ...turn, pendingActions: (turn.pendingActions ?? []).filter((c) => c.id !== change.id) }
+          : turn,
+      );
+      const applied = approvalMessage(
+        res.result,
+        change.kind === "write_records"
+          ? `Approved and applied changes to ${change.target}.`
+          : `Approved and scheduled deletion on ${change.target}.`,
+      );
+      thread = [...thread, { role: "assistant", content: applied }];
+      await invalidateAll();
+    } catch (e) {
+      errorText = e instanceof Error ? e.message : "Could not approve change.";
+    } finally {
+      busy = false;
+    }
+  }
+
+  function declineChange(turnIndex: number, changeId: string) {
+    thread = thread.map((turn, i) =>
+      i === turnIndex
+        ? { ...turn, pendingActions: (turn.pendingActions ?? []).filter((c) => c.id !== changeId) }
+        : turn,
+    );
   }
 </script>
 
@@ -179,18 +362,16 @@
               <div class="turn user">
                 <p class="who">You</p>
                 <div class="said">{t.content}</div>
-                {#if t.attachments?.length}
-                  <div class="thumbs">
-                    {#each t.attachments as img, ii (img.dataUrl + ii)}
-                      <img class="thumb" src={img.dataUrl} alt={img.name || "Uploaded screenshot"} />
-                    {/each}
-                  </div>
+                {#if t.attachmentCount}
+                  <p class="attach-summary">
+                    {t.attachmentCount} screenshot{t.attachmentCount === 1 ? "" : "s"} attached
+                  </p>
                 {/if}
               </div>
             {:else}
               <div class="turn bot">
                 <p class="who">Assistant</p>
-                <div class="reply">{t.content}</div>
+                <div class="reply">{@html renderMarkdown(t.content)}</div>
                 {#if t.steps && t.steps.length}
                   <details class="work" open={t.steps.some((s) => s.error)}>
                     <summary>{t.steps.length} {t.steps.length === 1 ? "step" : "steps"}</summary>
@@ -224,6 +405,54 @@
                     {/each}
                   </details>
                 {/if}
+                {#if t.pendingActions && t.pendingActions.length}
+                  <div class="approvals">
+                    <p class="approvals-title">Awaiting approval</p>
+                    {#each t.pendingActions as change, ci (change.id)}
+                      <div class="approval">
+                        <div class="approval-text">
+                          <strong>{change.summary}</strong>
+                          <p>{change.kind === "write_records" ? "Import" : "Delete"} proposal for {change.target}</p>
+                          {#if approvalPreview(change)}
+                            {@const preview = approvalPreview(change) ?? { title: "", columns: [], rows: [], total: 0 }}
+                            <div class="approval-preview">
+                              <p class="approval-preview-title">{preview.title}</p>
+                              <div class="approval-preview-wrap">
+                                <table class="approval-preview-table">
+                                  <thead>
+                                    <tr>
+                                      {#each preview.columns as c (c)}<th>{c}</th>{/each}
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {#each preview.rows as row, ri (ri)}
+                                      <tr>
+                                        {#each preview.columns as c (c)}<td>{cell(row[c])}</td>{/each}
+                                      </tr>
+                                    {/each}
+                                  </tbody>
+                                </table>
+                              </div>
+                              {#if change.kind === "write_records" && preview.total > preview.rows.length}
+                                <p class="approval-preview-more">
+                                  +{preview.total - preview.rows.length} more row{preview.total - preview.rows.length === 1 ? "" : "s"}
+                                </p>
+                              {/if}
+                            </div>
+                          {/if}
+                        </div>
+                        <div class="approval-actions">
+                          <button class="btn btn--primary" type="button" onclick={() => approveChange(i, change)} disabled={busy}>
+                            Approve
+                          </button>
+                          <button class="btn" type="button" onclick={() => declineChange(i, change.id)} disabled={busy}>
+                            Decline
+                          </button>
+                        </div>
+                      </div>
+                    {/each}
+                  </div>
+                {/if}
               </div>
             {/if}
           {/each}
@@ -256,20 +485,11 @@
         </button>
       {/if}
       {#if pendingImages.length}
-        <div class="pending">
-          {#each pendingImages as img, i (img.dataUrl + i)}
-            <div class="pending-item">
-              <img src={img.dataUrl} alt={img.name || "Screenshot"} />
-              <button
-                class="pending-remove"
-                type="button"
-                onclick={() => removeImage(i)}
-                aria-label="Remove screenshot"
-              >
-                ×
-              </button>
-            </div>
-          {/each}
+        <div class="pending-summary">
+          <span>{pendingImages.length} screenshot{pendingImages.length === 1 ? "" : "s"} selected</span>
+          <button class="clear-pending" type="button" onclick={clearImages} disabled={busy}>
+            Clear
+          </button>
         </div>
       {/if}
       <div class="field">
@@ -285,7 +505,7 @@
           class="attach"
           type="button"
           onclick={() => picker?.click()}
-          disabled={busy || pendingImages.length >= 6}
+          disabled={busy || pendingImages.length >= MAX_PENDING_IMAGES}
           aria-label="Upload screenshots"
         >
           +
@@ -311,8 +531,9 @@
         </button>
       </div>
       <p class="hint">
-        Upload screenshots, ask for extraction, and the assistant can save or delete records in your local
-        database when you explicitly request it. Enter to send, Shift+Enter for a new line.
+        Upload screenshots (up to {MAX_PENDING_IMAGES} per prompt), ask for extraction, and the assistant
+        can save or delete records in your local database when you explicitly request it. Enter to send,
+        Shift+Enter for a new line.
       </p>
     </div>
   </div>
@@ -444,26 +665,25 @@
     white-space: pre-wrap;
     overflow-wrap: anywhere;
   }
-  .thumbs {
-    margin-top: var(--s2);
-    display: flex;
-    gap: var(--s2);
-    flex-wrap: wrap;
-  }
-  .thumb {
-    width: 82px;
-    height: 82px;
-    object-fit: cover;
-    border-radius: var(--r-sm);
-    border: 1px solid var(--border);
-    background: var(--surface);
-  }
   .reply {
     font-size: 15.5px;
     line-height: 1.62;
     color: var(--text);
-    white-space: pre-wrap;
     overflow-wrap: anywhere;
+  }
+  .reply :global(p) {
+    margin: 0 0 10px;
+  }
+  .reply :global(p:last-child) {
+    margin-bottom: 0;
+  }
+  .reply :global(code) {
+    font-family: var(--font-mono);
+    font-size: 0.9em;
+    padding: 1px 5px;
+    border-radius: 6px;
+    background: var(--bg-sunken);
+    border: 1px solid var(--border);
   }
   .fail {
     margin: 0;
@@ -702,38 +922,112 @@
     font-size: 11.5px;
     color: var(--text-faint);
   }
-  .pending {
+  .attach-summary {
+    margin: var(--s2) 0 0;
+    font-size: 12px;
+    color: var(--text-faint);
+  }
+  .approvals {
+    margin-top: var(--s4);
+    padding: var(--s4);
+    border: 1px solid var(--border);
+    border-radius: var(--r);
+    background: var(--bg-sunken);
+  }
+  .approvals-title {
+    margin: 0 0 var(--s3);
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-faint);
+  }
+  .approval {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--s4);
+    padding-top: var(--s3);
+  }
+  .approval + .approval {
+    border-top: 1px solid var(--border);
+  }
+  .approval-text strong {
+    display: block;
+    font-size: 13.5px;
+  }
+  .approval-text p {
+    margin: 4px 0 0;
+    font-size: 12.5px;
+    color: var(--text-dim);
+  }
+  .approval-actions {
     display: flex;
     gap: var(--s2);
-    flex-wrap: wrap;
-    margin: 0 0 var(--s2);
+    flex: none;
+    align-self: flex-start;
   }
-  .pending-item {
-    position: relative;
-    width: 58px;
-    height: 58px;
+  .approval-preview {
+    margin-top: var(--s3);
   }
-  .pending-item img {
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-    border-radius: 7px;
+  .approval-preview-title {
+    margin: 0 0 6px;
+    font-size: 11px;
+    color: var(--text-faint);
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+  .approval-preview-wrap {
+    overflow-x: auto;
     border: 1px solid var(--border);
+    border-radius: 8px;
     background: var(--surface);
   }
-  .pending-remove {
-    position: absolute;
-    top: -7px;
-    right: -7px;
-    width: 18px;
-    height: 18px;
+  .approval-preview-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 11.5px;
+  }
+  .approval-preview-table th,
+  .approval-preview-table td {
+    padding: 5px 8px;
+    border-bottom: 1px solid var(--border);
+    text-align: left;
+    white-space: nowrap;
+  }
+  .approval-preview-table tbody tr:last-child td {
+    border-bottom: none;
+  }
+  .approval-preview-more {
+    margin: 6px 0 0;
+    font-size: 11px;
+    color: var(--text-faint);
+  }
+  .pending-summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--s3);
+    margin: 0 0 var(--s2);
+    padding: 8px 10px;
     border: 1px solid var(--border);
-    border-radius: 99px;
+    border-radius: 10px;
     background: var(--bg-sunken);
+    font-size: 12.5px;
     color: var(--text-dim);
-    font-size: 12px;
-    line-height: 1;
-    padding: 0;
+  }
+  .clear-pending {
+    flex: none;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: var(--surface);
+    color: var(--text-dim);
+    padding: 4px 10px;
+    font-size: 11.5px;
+  }
+  .clear-pending:hover:not(:disabled) {
+    border: 1px solid var(--border);
+    color: var(--text);
   }
 
   @media (max-width: 900px) {
