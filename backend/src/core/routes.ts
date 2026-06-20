@@ -67,6 +67,39 @@ function notFound(reply: FastifyReply, what: string) {
   return reply.code(404).send({ error: `${what} not found` });
 }
 
+function escHtml(v: string): string {
+  return v
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function oauthCallbackPage(provider: string, code: string | null, error: string | null): string {
+  const title = `${provider} authorization`;
+  const details = error
+    ? `<p class="err">Authorization failed: ${escHtml(error)}</p>`
+    : code
+      ? `<p>Authorization code:</p><pre id="code">${escHtml(code)}</pre>
+         <button id="copy">Copy code</button>
+         <p class="hint">Paste this code into LifeStack Settings to finish connecting.</p>`
+      : `<p class="err">No authorization code was returned.</p>`;
+
+  return `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>${title}</title>
+<style>
+body{font-family:Inter,system-ui,sans-serif;background:#0f1115;color:#e8eaf0;padding:28px}
+main{max-width:680px;margin:0 auto;background:#161922;border:1px solid #2a3140;border-radius:12px;padding:20px}
+h1{margin:0 0 14px;font-size:20px} pre{overflow:auto;background:#0f1115;border:1px solid #2a3140;padding:12px;border-radius:8px}
+button{border:1px solid #3b67f6;background:#2f54d6;color:#fff;border-radius:8px;padding:8px 12px;cursor:pointer}
+.hint{color:#b4b9c8}.err{color:#ff9da2}
+</style></head><body><main><h1>${title}</h1>${details}</main>
+<script>
+const b=document.getElementById('copy'); const c=document.getElementById('code');
+if(b&&c){ b.addEventListener('click', async ()=>{ try{ await navigator.clipboard.writeText(c.textContent||''); b.textContent='Copied'; }catch{} }); }
+</script></body></html>`;
+}
+
 async function resolve(
   moduleId: string,
   connectorId: string,
@@ -87,6 +120,24 @@ async function resolve(
 
 export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.get("/health", async () => ({ ok: true, service: "lifestack-backend" }));
+
+  app.get<{ Querystring: { code?: string; error?: string } }>("/api/oauth/gmail", async (req, reply) => {
+    const code = typeof req.query?.code === "string" ? req.query.code : null;
+    const error = typeof req.query?.error === "string" ? req.query.error : null;
+    return reply
+      .code(error ? 400 : 200)
+      .type("text/html; charset=utf-8")
+      .send(oauthCallbackPage("Gmail", code, error));
+  });
+
+  app.get<{ Querystring: { code?: string; error?: string } }>("/api/oauth/outlook", async (req, reply) => {
+    const code = typeof req.query?.code === "string" ? req.query.code : null;
+    const error = typeof req.query?.error === "string" ? req.query.error : null;
+    return reply
+      .code(error ? 400 : 200)
+      .type("text/html; charset=utf-8")
+      .send(oauthCallbackPage("Outlook", code, error));
+  });
 
   app.get("/api/modules", async () => {
     const out = [];
@@ -313,7 +364,6 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(400).send({ ok: false, error: "original and patch are required" });
     }
     const keys: Array<keyof typeof patch> = [
-      "day",
       "started_at",
       "provider",
       "type",
@@ -322,6 +372,11 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       "cost",
       "cost_currency",
     ];
+    const patchDay = String(patch.day ?? "").trim();
+    const originalDay = String(original.day ?? "").trim();
+    if (patchDay && originalDay && patchDay !== originalDay) {
+      return reply.code(400).send({ ok: false, error: "Changing day is not supported for ride updates." });
+    }
     const setClauses: string[] = [];
     let nextCost = Number(original.cost ?? 0);
     let nextCurrency = String(original.cost_currency ?? "EUR").toUpperCase();

@@ -1,4 +1,20 @@
-import type { LifeStackModule } from "../../core/types";
+import type { Connector, LifeStackModule } from "../../core/types";
+
+const inboxFoodScan: Connector = {
+  id: "inbox-food",
+  name: "Email receipts",
+  description: "Control whether inbox scanning imports food delivery receipts into this module.",
+  kind: "manual",
+  configSchema: [
+    {
+      key: "scanFood",
+      label: "Scan food delivery receipts",
+      type: "boolean",
+      default: true,
+      help: "Uber Eats, Thuisbezorgd, takeaway.com",
+    },
+  ],
+};
 
 const food: LifeStackModule = {
   id: "food",
@@ -21,7 +37,7 @@ const food: LifeStackModule = {
        source String DEFAULT 'assistant'
      ) ENGINE = MergeTree ORDER BY (day, provider, merchant)`,
   ],
-  connectors: [],
+  connectors: [inboxFoodScan],
   widgets: [
     {
       id: "orders-month",

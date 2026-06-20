@@ -302,6 +302,8 @@ export async function configView(m: LifeStackModule, c: Connector) {
 
 /** Public view of a connector, including state and last sync. */
 export async function connectorView(m: LifeStackModule, c: Connector) {
+  const authUrl =
+    c.authorizeUrl ? await c.authorizeUrl(await buildConnectorContext(m, c)) : null;
   return {
     id: c.id,
     name: c.name,
@@ -311,6 +313,7 @@ export async function connectorView(m: LifeStackModule, c: Connector) {
     enabled: await isConnectorEnabled(m.id, c.id),
     hasSync: !!c.sync,
     hasAuthorize: c.hasAuthorize ?? !!c.authorize,
+    authorizeUrl: authUrl,
     hasImport: !!c.import,
     syncIntervalMinutes: c.syncIntervalMinutes ?? null,
     config: await configView(m, c),

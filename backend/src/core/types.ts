@@ -97,6 +97,8 @@ export interface Connector {
   syncIntervalMinutes?: number;
   /** Set to true if this connector requires OAuth authorization via authorize(). */
   hasAuthorize?: boolean;
+  /** Optional provider authorize URL shown in UI for OAuth-style connectors. */
+  authorizeUrl?: (ctx: ConnectorContext) => Promise<string | null> | string | null;
   sync?: (ctx: ConnectorContext) => Promise<SyncResult>;
   /** Optional explicit auth step (e.g. OAuth PIN exchange) separate from data sync. */
   authorize?: (ctx: ConnectorContext, input: Record<string, unknown>) => Promise<SyncResult>;

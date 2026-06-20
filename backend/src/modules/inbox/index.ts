@@ -31,6 +31,8 @@ interface Candidate {
   type: string;
   merchant: string;
   itemsCount?: number;
+  pickupLocation?: string;
+  dropoffLocation?: string;
 }
 
 function toNum(v: string): number {
@@ -91,6 +93,55 @@ function pickDistanceKm(text: string): number {
   return m ? toNum(m[1]) : 0;
 }
 
+function haversineDistance(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const R = 6371; // Earth radius in km
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLon = ((lon2 - lon1) * Math.PI) / 180;
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos((lat1 * Math.PI) / 180) * Math.cos((lat2 * Math.PI) / 180) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return round2(R * c);
+}
+
+function pickUberLocations(text: string): { pickup?: string; dropoff?: string; distanceKm: number } {
+  let pickup: string | undefined;
+  let dropoff: string | undefined;
+  let distanceKm = 0;
+
+  // Try to extract pickup location
+  const pickupMatch = text.match(/pick(?:ed)?\s+up\s+(?:at|from)?\s*([^\n\r,]+?)(?:\n|,|$)/i);
+  if (pickupMatch?.[1]) pickup = pickupMatch[1].trim().slice(0, 100);
+
+  // Try to extract dropoff location
+  const dropoffMatch = text.match(/drop(?:ped)?\s+off\s+(?:at|to)?\s*([^\n\r,]+?)(?:\n|,|$)/i);
+  if (dropoffMatch?.[1]) dropoff = dropoffMatch[1].trim().slice(0, 100);
+
+  // Try to extract coordinates from either location (format: "52.3676° N, 4.9041° E" or "52.3676, 4.9041")
+  const coordPattern = /(\d+(?:\.\d+)?)[°]?\s*([NS])?[,\s]+(\d+(?:\.\d+)?)[°]?\s*([EW])?/gi;
+  const coords: Array<{ lat: number; lon: number }> = [];
+
+  let match;
+  while ((match = coordPattern.exec(text))) {
+    let lat = parseFloat(match[1]);
+    let lon = parseFloat(match[3]);
+
+    if (match[2]?.toUpperCase() === "S") lat = -lat;
+    if (match[4]?.toUpperCase() === "W") lon = -lon;
+
+    if (lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180) {
+      coords.push({ lat, lon });
+    }
+  }
+
+  // If we found 2 coordinates, calculate distance
+  if (coords.length >= 2) {
+    distanceKm = haversineDistance(coords[0].lat, coords[0].lon, coords[1].lat, coords[1].lon);
+  }
+
+  return { pickup, dropoff, distanceKm };
+}
+
 function pickDurationMin(text: string): number {
   const m = text.match(/([0-9]{1,3})\s*(?:min|mins|minutes)\b/i);
   return m ? Math.round(toNum(m[1])) : 0;
@@ -132,12 +183,12 @@ function detectCandidates(
   const amount = pickAmount(text);
   const day = isoDay(date);
   const startedAt = isoStamp(date);
-  const distanceKm = pickDistanceKm(text);
+  let distanceKm = pickDistanceKm(text);
   const durationMin = pickDurationMin(text);
   const merchant = pickMerchant(text);
   const out: Candidate[] = [];
 
-  const maybeRide = (provider: string, type: string) =>
+  const maybeRide = (provider: string, type: string, pickupLoc?: string, dropoffLoc?: string, calculatedDist?: number) =>
     out.push({
       kind: "mobility",
       provider,
@@ -146,10 +197,12 @@ function detectCandidates(
       startedAt,
       amount: amount.amount,
       currency: amount.currency,
-      distanceKm,
+      distanceKm: calculatedDist ?? distanceKm,
       durationMin,
       type,
       merchant: "",
+      pickupLocation: pickupLoc,
+      dropoffLocation: dropoffLoc,
     });
 
   const maybeFood = (provider: string) =>
@@ -185,29 +238,40 @@ function detectCandidates(
     });
   };
 
-  if (enabled(cfg, "scanUberEats", true) && (lower.includes("uber eats") || lower.includes("ubereats"))) {
+  if (enabled(cfg, "scanFood", true) && (lower.includes("uber eats") || lower.includes("ubereats"))) {
     maybeFood("Uber Eats");
   }
-  if (enabled(cfg, "scanThuisbezorgd", true) && (lower.includes("thuisbezorgd") || lower.includes("takeaway.com"))) {
+  if (enabled(cfg, "scanFood", true) && (lower.includes("thuisbezorgd") || lower.includes("takeaway.com"))) {
     maybeFood("Thuisbezorgd");
   }
-  if (enabled(cfg, "scanAlbertHeijn", true) && (lower.includes("albert heijn") || lower.includes("ah.nl"))) {
+  if (enabled(cfg, "scanGroceries", true) && (lower.includes("albert heijn") || lower.includes("ah.nl"))) {
     maybeGroceries("Albert Heijn");
   }
-  if (enabled(cfg, "scanJumbo", true) && lower.includes("jumbo")) {
+  if (enabled(cfg, "scanGroceries", true) && lower.includes("jumbo")) {
     maybeGroceries("Jumbo");
   }
-  if (enabled(cfg, "scanLime", true) && lower.includes("lime")) {
+  if (enabled(cfg, "scanMobility", true) && lower.includes("lime")) {
     const type = lower.includes("bike") ? "bike" : "scooter";
     maybeRide("Lime", type);
   }
-  if (enabled(cfg, "scanBolt", true) && lower.includes("bolt")) {
+  if (enabled(cfg, "scanMobility", true) && lower.includes("bolt")) {
     const type = lower.includes("scooter") ? "scooter" : lower.includes("bike") ? "bike" : "taxi";
     maybeRide("Bolt", type);
   }
-  if (enabled(cfg, "scanUber", true) && lower.includes("uber") && !lower.includes("uber eats") && !lower.includes("ubereats")) {
+  if (enabled(cfg, "scanMobility", true) && lower.includes("uber") && !lower.includes("uber eats") && !lower.includes("ubereats")) {
     const type = lower.includes("scooter") ? "scooter" : lower.includes("bike") ? "bike" : "taxi";
-    maybeRide("Uber", type);
+    
+    // For Uber taxi rides, try to extract distance from locations
+    if (type === "taxi") {
+      const locations = pickUberLocations(text);
+      if (locations.distanceKm > 0) {
+        maybeRide("Uber", type, locations.pickup, locations.dropoff, locations.distanceKm);
+      } else {
+        maybeRide("Uber", type, locations.pickup, locations.dropoff);
+      }
+    } else {
+      maybeRide("Uber", type);
+    }
   }
   return out;
 }
@@ -226,31 +290,77 @@ async function existingDedupe(ctx: ConnectorContext, keys: string[]): Promise<Se
   return seen;
 }
 
-const MOBILITY_TOGGLES = [
-  { key: "scanUber", label: "Scan Uber rides", icon: "https://upload.wikimedia.org/wikipedia/commons/6/62/Uber_logo.svg" },
-  { key: "scanLime", label: "Scan Lime rides", icon: "https://upload.wikimedia.org/wikipedia/commons/e/e1/Lime_%28transportation_company%29_logo.svg" },
-  { key: "scanBolt", label: "Scan Bolt rides", icon: "https://upload.wikimedia.org/wikipedia/commons/2/28/Vector_logo_of_Bolt.svg" },
-];
+const MOBILITY_SCAN_MODULE_ID = "mobility";
+const FOOD_SCAN_MODULE_ID = "food";
+const GROCERIES_SCAN_MODULE_ID = "groceries";
+const MOBILITY_SCAN_CONNECTOR_ID = "inbox-mobility";
+const FOOD_SCAN_CONNECTOR_ID = "inbox-food";
+const GROCERIES_SCAN_CONNECTOR_ID = "inbox-groceries";
 
-const FOOD_TOGGLES = [
-  { key: "scanThuisbezorgd", label: "Scan Thuisbezorgd orders", icon: "https://upload.wikimedia.org/wikipedia/commons/thumb/a/a9/Thuisbezorgd.svg/1024px-Thuisbezorgd.svg.png" },
-  { key: "scanUberEats", label: "Scan Uber Eats orders", icon: "https://upload.wikimedia.org/wikipedia/commons/thumb/1/1c/Uber_Eats.svg/1024px-Uber_Eats.svg.png" },
-];
+async function loadConnectorConfig(
+  ctx: ConnectorContext,
+  moduleId: string,
+  connectorId: string,
+): Promise<Record<string, unknown>> {
+  const rows = await ctx.db.query<{ config: string }>(
+    `SELECT config FROM connector_state FINAL
+     WHERE module_id = {moduleId:String} AND connector_id = {connectorId:String}
+     LIMIT 1`,
+    { moduleId, connectorId },
+  );
 
-const GROCERY_TOGGLES = [
-  { key: "scanAlbertHeijn", label: "Scan Albert Heijn receipts", icon: "https://upload.wikimedia.org/wikipedia/commons/thumb/1/1c/Albert_Heijn_logo.svg/1024px-Albert_Heijn_logo.svg.png" },
-  { key: "scanJumbo", label: "Scan Jumbo receipts", icon: "https://upload.wikimedia.org/wikipedia/commons/thumb/c/cc/Jumbo_supermarkt_logo.svg/1024px-Jumbo_supermarkt_logo.svg.png" },
-];
+  const raw = rows[0]?.config;
+  if (typeof raw !== "string" || !raw.trim()) return {};
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : {};
+  } catch (err) {
+    ctx.logger.warn(
+      `inbox:${moduleId}/${connectorId} config is not valid JSON: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return {};
+  }
+}
 
-const ALL_PROVIDER_TOGGLES = [...MOBILITY_TOGGLES, ...FOOD_TOGGLES, ...GROCERY_TOGGLES];
+async function resolveScanConfig(ctx: ConnectorContext): Promise<Record<string, unknown>> {
+  const [mobilityCfg, foodCfg, groceriesCfg] = await Promise.all([
+    loadConnectorConfig(ctx, MOBILITY_SCAN_MODULE_ID, MOBILITY_SCAN_CONNECTOR_ID),
+    loadConnectorConfig(ctx, FOOD_SCAN_MODULE_ID, FOOD_SCAN_CONNECTOR_ID),
+    loadConnectorConfig(ctx, GROCERIES_SCAN_MODULE_ID, GROCERIES_SCAN_CONNECTOR_ID),
+  ]);
 
-async function exchangeGmailCode(code: string): Promise<{ accessToken: string; refreshToken: string }> {
-  const clientId = process.env.GMAIL_CLIENT_ID ?? "";
-  const clientSecret = process.env.GMAIL_CLIENT_SECRET ?? "";
-  const redirectUri = process.env.GMAIL_REDIRECT_URI ?? "http://localhost:3000/api/oauth/gmail";
+  return { ...ctx.config, ...mobilityCfg, ...foodCfg, ...groceriesCfg };
+}
 
-  if (!clientId || !clientSecret) throw new Error("Gmail OAuth credentials not configured.");
+function gmailAuthorizeUrl(clientId: string, redirectUri: string): string | null {
+  if (!clientId) return null;
+  const u = new URL("https://accounts.google.com/o/oauth2/v2/auth");
+  u.searchParams.set("response_type", "code");
+  u.searchParams.set("client_id", clientId);
+  u.searchParams.set("redirect_uri", redirectUri);
+  u.searchParams.set("scope", "https://www.googleapis.com/auth/gmail.readonly");
+  u.searchParams.set("access_type", "offline");
+  u.searchParams.set("prompt", "consent");
+  return u.toString();
+}
 
+function outlookAuthorizeUrl(clientId: string, redirectUri: string): string | null {
+  if (!clientId) return null;
+  const u = new URL("https://login.microsoftonline.com/common/oauth2/v2.0/authorize");
+  u.searchParams.set("client_id", clientId);
+  u.searchParams.set("response_type", "code");
+  u.searchParams.set("redirect_uri", redirectUri);
+  u.searchParams.set("response_mode", "query");
+  u.searchParams.set("scope", "offline_access Mail.Read");
+  return u.toString();
+}
+
+async function exchangeGmailCode(
+  code: string,
+  clientId: string,
+  clientSecret: string,
+  redirectUri: string,
+): Promise<{ accessToken: string; refreshToken: string }> {
   const res = await fetch("https://oauth2.googleapis.com/token", {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -273,12 +383,11 @@ async function exchangeGmailCode(code: string): Promise<{ accessToken: string; r
   return { accessToken: data.access_token, refreshToken: data.refresh_token ?? "" };
 }
 
-async function refreshGmailToken(refreshToken: string): Promise<string> {
-  const clientId = process.env.GMAIL_CLIENT_ID ?? "";
-  const clientSecret = process.env.GMAIL_CLIENT_SECRET ?? "";
-
-  if (!clientId || !clientSecret) throw new Error("Gmail OAuth credentials not configured.");
-
+async function refreshGmailToken(
+  refreshToken: string,
+  clientId: string,
+  clientSecret: string,
+): Promise<string> {
   const res = await fetch("https://oauth2.googleapis.com/token", {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -326,13 +435,12 @@ async function fetchGmailMessages(accessToken: string, lookbackDays: number): Pr
   return messages;
 }
 
-async function exchangeOutlookCode(code: string): Promise<{ accessToken: string; refreshToken: string }> {
-  const clientId = process.env.OUTLOOK_CLIENT_ID ?? "";
-  const clientSecret = process.env.OUTLOOK_CLIENT_SECRET ?? "";
-  const redirectUri = process.env.OUTLOOK_REDIRECT_URI ?? "http://localhost:3000/api/oauth/outlook";
-
-  if (!clientId || !clientSecret) throw new Error("Outlook OAuth credentials not configured.");
-
+async function exchangeOutlookCode(
+  code: string,
+  clientId: string,
+  clientSecret: string,
+  redirectUri: string,
+): Promise<{ accessToken: string; refreshToken: string }> {
   const res = await fetch("https://login.microsoftonline.com/common/oauth2/v2.0/token", {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -356,12 +464,11 @@ async function exchangeOutlookCode(code: string): Promise<{ accessToken: string;
   return { accessToken: data.access_token, refreshToken: data.refresh_token ?? "" };
 }
 
-async function refreshOutlookToken(refreshToken: string): Promise<string> {
-  const clientId = process.env.OUTLOOK_CLIENT_ID ?? "";
-  const clientSecret = process.env.OUTLOOK_CLIENT_SECRET ?? "";
-
-  if (!clientId || !clientSecret) throw new Error("Outlook OAuth credentials not configured.");
-
+async function refreshOutlookToken(
+  refreshToken: string,
+  clientId: string,
+  clientSecret: string,
+): Promise<string> {
   const res = await fetch("https://login.microsoftonline.com/common/oauth2/v2.0/token", {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -417,13 +524,33 @@ const gmailConnector: Connector = {
   syncIntervalMinutes: 30,
   hasAuthorize: true,
   configSchema: [
-    { key: "section_mobility", label: "Mobility", type: "section" as const },
-    ...MOBILITY_TOGGLES.map((p) => ({ key: p.key, label: p.label, type: "boolean" as const, default: true, icon: p.icon })),
-    { key: "section_food", label: "Food & Delivery", type: "section" as const },
-    ...FOOD_TOGGLES.map((p) => ({ key: p.key, label: p.label, type: "boolean" as const, default: true, icon: p.icon })),
-    { key: "section_groceries", label: "Groceries", type: "section" as const },
-    ...GROCERY_TOGGLES.map((p) => ({ key: p.key, label: p.label, type: "boolean" as const, default: true, icon: p.icon })),
+    {
+      key: "clientId",
+      label: "Gmail OAuth Client ID",
+      type: "text",
+      help: "From your Google Cloud OAuth app. Required to authorize Gmail.",
+    },
+    {
+      key: "clientSecret",
+      label: "Gmail OAuth Client secret",
+      type: "password",
+      secret: true,
+      help: "From the same OAuth app. Stored securely in connector settings.",
+    },
+    {
+      key: "redirectUri",
+      label: "Gmail redirect URI",
+      type: "text",
+      default: "http://localhost:3000/api/oauth/gmail",
+      help: "Set this exact URI in your OAuth app's authorized redirect URIs.",
+    },
   ],
+  authorizeUrl: (ctx) => {
+    const clientId = String(ctx.config.clientId ?? "").trim();
+    const redirectUri =
+      String(ctx.config.redirectUri ?? "").trim() || "http://localhost:3000/api/oauth/gmail";
+    return gmailAuthorizeUrl(clientId, redirectUri);
+  },
   async authorize(ctx, input) {
     if (input.disconnect) {
       await ctx.saveConfig({ gmailAccessToken: "", gmailRefreshToken: "" });
@@ -431,10 +558,21 @@ const gmailConnector: Connector = {
     }
 
     const code = String(input.code ?? "").trim();
+    const clientId = String(ctx.config.clientId ?? "").trim();
+    const clientSecret = String(ctx.config.clientSecret ?? "").trim();
+    const redirectUri =
+      String(ctx.config.redirectUri ?? "").trim() || "http://localhost:3000/api/oauth/gmail";
     if (!code) throw new Error("Paste the authorization code from Gmail.");
+    if (!clientId || !clientSecret)
+      throw new Error("Save Gmail OAuth Client ID and Client secret first.");
 
     try {
-      const { accessToken, refreshToken } = await exchangeGmailCode(code);
+      const { accessToken, refreshToken } = await exchangeGmailCode(
+        code,
+        clientId,
+        clientSecret,
+        redirectUri,
+      );
       await ctx.saveConfig({ gmailAccessToken: accessToken, gmailRefreshToken: refreshToken });
       return { message: "Connected to Gmail." };
     } catch (e) {
@@ -444,8 +582,13 @@ const gmailConnector: Connector = {
   async sync(ctx) {
     let token = String(ctx.config.gmailAccessToken ?? "").trim();
     const refreshToken = String(ctx.config.gmailRefreshToken ?? "").trim();
+    const clientId = String(ctx.config.clientId ?? "").trim();
+    const clientSecret = String(ctx.config.clientSecret ?? "").trim();
     const lookbackDays = Math.max(1, Math.round(Number(ctx.config.lookbackDays ?? 14)));
+    const scanCfg = await resolveScanConfig(ctx);
 
+    if (!clientId || !clientSecret)
+      throw new Error("Set Gmail OAuth Client ID and Client secret in connector settings.");
     if (!token) throw new Error("Connect Gmail first.");
 
     try {
@@ -465,7 +608,7 @@ const gmailConnector: Connector = {
 
         const body = [msg.headers.subject ?? "", msg.body].join("\n");
         const date = new Date(msg.headers.date ?? new Date());
-        const candidates = detectCandidates(body, msg.id, date, ctx.config);
+        const candidates = detectCandidates(body, msg.id, date, scanCfg);
 
         for (const c of candidates) {
           if (c.kind === "mobility") {
@@ -536,7 +679,7 @@ const gmailConnector: Connector = {
       if (msg.includes("expired")) {
         if (refreshToken) {
           try {
-            token = await refreshGmailToken(refreshToken);
+            token = await refreshGmailToken(refreshToken, clientId, clientSecret);
             await ctx.saveConfig({ gmailAccessToken: token });
             return { message: "Gmail session refreshed. Please retry sync." };
           } catch {
@@ -557,13 +700,33 @@ const outlookConnector: Connector = {
   syncIntervalMinutes: 30,
   hasAuthorize: true,
   configSchema: [
-    { key: "section_mobility", label: "Mobility", type: "section" as const },
-    ...MOBILITY_TOGGLES.map((p) => ({ key: p.key, label: p.label, type: "boolean" as const, default: true, icon: p.icon })),
-    { key: "section_food", label: "Food & Delivery", type: "section" as const },
-    ...FOOD_TOGGLES.map((p) => ({ key: p.key, label: p.label, type: "boolean" as const, default: true, icon: p.icon })),
-    { key: "section_groceries", label: "Groceries", type: "section" as const },
-    ...GROCERY_TOGGLES.map((p) => ({ key: p.key, label: p.label, type: "boolean" as const, default: true, icon: p.icon })),
+    {
+      key: "clientId",
+      label: "Outlook OAuth Client ID",
+      type: "text",
+      help: "From your Microsoft Entra app registration. Required to authorize Outlook.",
+    },
+    {
+      key: "clientSecret",
+      label: "Outlook OAuth Client secret",
+      type: "password",
+      secret: true,
+      help: "From the same app registration. Stored securely in connector settings.",
+    },
+    {
+      key: "redirectUri",
+      label: "Outlook redirect URI",
+      type: "text",
+      default: "http://localhost:3000/api/oauth/outlook",
+      help: "Set this exact URI in your app registration redirect URIs.",
+    },
   ],
+  authorizeUrl: (ctx) => {
+    const clientId = String(ctx.config.clientId ?? "").trim();
+    const redirectUri =
+      String(ctx.config.redirectUri ?? "").trim() || "http://localhost:3000/api/oauth/outlook";
+    return outlookAuthorizeUrl(clientId, redirectUri);
+  },
   async authorize(ctx, input) {
     if (input.disconnect) {
       await ctx.saveConfig({ outlookAccessToken: "", outlookRefreshToken: "" });
@@ -571,10 +734,21 @@ const outlookConnector: Connector = {
     }
 
     const code = String(input.code ?? "").trim();
+    const clientId = String(ctx.config.clientId ?? "").trim();
+    const clientSecret = String(ctx.config.clientSecret ?? "").trim();
+    const redirectUri =
+      String(ctx.config.redirectUri ?? "").trim() || "http://localhost:3000/api/oauth/outlook";
     if (!code) throw new Error("Paste the authorization code from Outlook.");
+    if (!clientId || !clientSecret)
+      throw new Error("Save Outlook OAuth Client ID and Client secret first.");
 
     try {
-      const { accessToken, refreshToken } = await exchangeOutlookCode(code);
+      const { accessToken, refreshToken } = await exchangeOutlookCode(
+        code,
+        clientId,
+        clientSecret,
+        redirectUri,
+      );
       await ctx.saveConfig({ outlookAccessToken: accessToken, outlookRefreshToken: refreshToken });
       return { message: "Connected to Outlook." };
     } catch (e) {
@@ -584,8 +758,13 @@ const outlookConnector: Connector = {
   async sync(ctx) {
     let token = String(ctx.config.outlookAccessToken ?? "").trim();
     const refreshToken = String(ctx.config.outlookRefreshToken ?? "").trim();
+    const clientId = String(ctx.config.clientId ?? "").trim();
+    const clientSecret = String(ctx.config.clientSecret ?? "").trim();
     const lookbackDays = Math.max(1, Math.round(Number(ctx.config.lookbackDays ?? 14)));
+    const scanCfg = await resolveScanConfig(ctx);
 
+    if (!clientId || !clientSecret)
+      throw new Error("Set Outlook OAuth Client ID and Client secret in connector settings.");
     if (!token) throw new Error("Connect Outlook first.");
 
     try {
@@ -605,7 +784,7 @@ const outlookConnector: Connector = {
 
         const body = [msg.subject, msg.body].join("\n");
         const date = new Date(msg.receivedDateTime);
-        const candidates = detectCandidates(body, msg.id, date, ctx.config);
+        const candidates = detectCandidates(body, msg.id, date, scanCfg);
 
         for (const c of candidates) {
           if (c.kind === "mobility") {
@@ -676,7 +855,7 @@ const outlookConnector: Connector = {
       if (msg.includes("expired")) {
         if (refreshToken) {
           try {
-            token = await refreshOutlookToken(refreshToken);
+            token = await refreshOutlookToken(refreshToken, clientId, clientSecret);
             await ctx.saveConfig({ outlookAccessToken: token });
             return { message: "Outlook session refreshed. Please retry sync." };
           } catch {
@@ -706,12 +885,6 @@ const mailReceipts: Connector = {
     { key: "mailbox", label: "Folder", type: "text", default: "INBOX" },
     { key: "scanDays", label: "Look back days", type: "number", default: 14 },
     { key: "maxMessages", label: "Max emails per sync", type: "number", default: 400 },
-    { key: "section_mobility_scan", label: "Mobility", type: "section" as const },
-    ...MOBILITY_TOGGLES.map((p) => ({ key: p.key, label: p.label, type: "boolean" as const, default: true, icon: p.icon })),
-    { key: "section_food_scan", label: "Food & Delivery", type: "section" as const },
-    ...FOOD_TOGGLES.map((p) => ({ key: p.key, label: p.label, type: "boolean" as const, default: true, icon: p.icon })),
-    { key: "section_groceries_scan", label: "Groceries", type: "section" as const },
-    ...GROCERY_TOGGLES.map((p) => ({ key: p.key, label: p.label, type: "boolean" as const, default: true, icon: p.icon })),
   ],
   async sync(ctx) {
     const host = String(ctx.config.imapHost ?? "").trim();
@@ -722,6 +895,7 @@ const mailReceipts: Connector = {
     const mailbox = String(ctx.config.mailbox ?? "INBOX").trim() || "INBOX";
     const scanDays = Math.max(1, Math.round(Number(ctx.config.scanDays ?? 14)));
     const maxMessages = Math.max(10, Math.round(Number(ctx.config.maxMessages ?? 400)));
+    const scanCfg = await resolveScanConfig(ctx);
 
     if (!host || !user || !pass) throw new Error("Set IMAP host, username, and password/app password.");
 
@@ -761,7 +935,7 @@ const mailReceipts: Connector = {
                 : Buffer.from([]);
           const parsed = await simpleParser(sourceBuffer);
           const body = [parsed.subject ?? "", parsed.text ?? "", parsed.html ? String(parsed.html) : ""].join("\n");
-          const candidates = detectCandidates(body, messageId, parsed.date ?? envelopeDate, ctx.config);
+          const candidates = detectCandidates(body, messageId, parsed.date ?? envelopeDate, scanCfg);
           for (const c of candidates) {
             const key = `${c.kind}|${c.provider}|${c.messageId}`;
             parsedCandidates.push({ key, data: c });

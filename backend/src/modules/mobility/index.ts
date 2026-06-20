@@ -1,4 +1,4 @@
-import type { LifeStackModule } from "../../core/types";
+import type { Connector, LifeStackModule } from "../../core/types";
 
 const providerLabelExpr = `multiIf(
   lowerUTF8(provider) LIKE '%uber%', 'Uber',
@@ -16,6 +16,22 @@ const rideTypeLabelExpr = `multiIf(
   lowerUTF8(type) IN ('taxi', 'car', 'ride', 'cab'), 'Taxi 🚕',
   type
 )`;
+
+const inboxMobilityScan: Connector = {
+  id: "inbox-mobility",
+  name: "Email receipts",
+  description: "Control whether inbox scanning imports mobility rides into this module.",
+  kind: "manual",
+  configSchema: [
+    {
+      key: "scanMobility",
+      label: "Scan mobility receipts",
+      type: "boolean",
+      default: true,
+      help: "Uber, Lime, Bolt rides and scooters",
+    },
+  ],
+};
 
 const mobility: LifeStackModule = {
   id: "mobility",
@@ -53,21 +69,35 @@ const mobility: LifeStackModule = {
        WHEN cost_currency = 'HUF' THEN round(cost * 0.0025, 2)
        ELSE cost
      END WHERE cost_eur = cost AND cost_currency != 'EUR'`,
+    `CREATE TABLE IF NOT EXISTS mobility_lime_pass (
+      day Date,
+      created_at DateTime64(3) DEFAULT now64(3),
+      cost Float64,
+      cost_currency String DEFAULT 'EUR',
+      cost_eur Float64 DEFAULT cost,
+      description String DEFAULT '',
+      notes String DEFAULT ''
+     ) ENGINE = MergeTree ORDER BY day`,
   ],
-  connectors: [],
+  connectors: [inboxMobilityScan],
   widgets: [
     {
-      id: "total-spent",
-      title: "Total spend",
-      type: "metric",
-      size: "sm",
-      featured: true,
-      async query(ctx) {
-        const rows = await ctx.db.query<{ v: number }>(
-        `SELECT round(sum(cost_eur), 2) AS v FROM mobility_ride`,
-        );
-        return { value: rows[0]?.v ?? 0, format: "currency" };
-      },
+     id: "total-spent",
+     title: "Total spend",
+     type: "metric",
+     size: "sm",
+     featured: true,
+     async query(ctx) {
+       const rows = await ctx.db.query<{ rides: number; passes: number; total: number }>(
+        `SELECT 
+           round(sum(cost_eur), 2) AS rides,
+           (SELECT round(sum(cost_eur), 2) FROM mobility_lime_pass) AS passes,
+           round(sum(cost_eur), 2) + coalesce((SELECT round(sum(cost_eur), 2) FROM mobility_lime_pass), 0) AS total
+         FROM mobility_ride`,
+       );
+       const r = rows[0] ?? { rides: 0, passes: 0, total: 0 };
+       return { value: r.total, format: "currency" };
+     },
     },
     {
       id: "total-distance",
@@ -79,6 +109,71 @@ const mobility: LifeStackModule = {
           `SELECT round(sum(distance_km), 1) AS v FROM mobility_ride`,
         );
         return { value: rows[0]?.v ?? 0, unit: "km" };
+      },
+    },
+    {
+      id: "avg-speed-by-type",
+      title: "Average speed",
+      type: "split",
+      size: "md",
+      async query(ctx) {
+        const rows = await ctx.db.query<{ bike: number; scooter: number }>(
+          `SELECT
+             round(
+               if(
+                 sumIf(duration_min, lowerUTF8(type) = 'bike' AND duration_min > 0 AND distance_km > 0) = 0,
+                 0,
+                 sumIf(distance_km, lowerUTF8(type) = 'bike' AND duration_min > 0 AND distance_km > 0) * 60.0
+                   / sumIf(duration_min, lowerUTF8(type) = 'bike' AND duration_min > 0 AND distance_km > 0)
+               ),
+               1
+             ) AS bike,
+             round(
+               if(
+                 sumIf(duration_min, lowerUTF8(type) = 'scooter' AND duration_min > 0 AND distance_km > 0) = 0,
+                 0,
+                 sumIf(distance_km, lowerUTF8(type) = 'scooter' AND duration_min > 0 AND distance_km > 0) * 60.0
+                   / sumIf(duration_min, lowerUTF8(type) = 'scooter' AND duration_min > 0 AND distance_km > 0)
+               ),
+               1
+             ) AS scooter
+           FROM mobility_ride`,
+        );
+        const r = rows[0] ?? { bike: 0, scooter: 0 };
+        return {
+          parts: [
+            { label: "Bike", value: r.bike, unit: "km/h", format: "number" },
+            { label: "Scooter", value: r.scooter, unit: "km/h", format: "number" },
+          ],
+        };
+      },
+    },
+    {
+      id: "top-speed-by-type",
+      title: "Highest average speed",
+      type: "list",
+      size: "md",
+      async query(ctx) {
+        const rows = await ctx.db.query<{ label: string; value: number; sub: string }>(
+          `SELECT
+             if(kind = 'bike', 'Bike', 'Scooter') AS label,
+             round(max(avg_speed), 1) AS value,
+             concat(toString(argMax(day, avg_speed)), ' · ', argMax(${providerLabelExpr}, avg_speed)) AS sub
+           FROM (
+             SELECT
+               lowerUTF8(type) AS kind,
+               day,
+               provider,
+               distance_km * 60.0 / duration_min AS avg_speed
+             FROM mobility_ride
+             WHERE duration_min > 0
+               AND distance_km > 0
+               AND lowerUTF8(type) IN ('bike', 'scooter')
+           )
+           GROUP BY kind
+           ORDER BY label ASC`,
+        );
+        return { items: rows, format: "number" };
       },
     },
     {
@@ -195,6 +290,7 @@ const mobility: LifeStackModule = {
             ${rideTypeLabelExpr} AS ride_type,
             distance_km AS distance,
             duration_min AS minutes,
+            round(if(duration_min > 0, distance_km * 60.0 / duration_min, 0), 1) AS avg_speed,
             round(cost, 2) AS cost_original,
             upperUTF8(cost_currency) AS currency,
             round(cost_eur, 2) AS cost_eur,
@@ -219,6 +315,7 @@ const mobility: LifeStackModule = {
            { key: "ride_type", label: "Type" },
            { key: "distance", label: "km", align: "right" },
            { key: "minutes", label: "Min", align: "right" },
+           { key: "avg_speed", label: "Avg km/h", align: "right" },
            { key: "cost_original", label: "Original", align: "right" },
            { key: "currency", label: "Cur." },
            { key: "cost_eur", label: "EUR", format: "currency", align: "right" },
@@ -229,5 +326,71 @@ const mobility: LifeStackModule = {
     },
   ],
 };
+
+const limePassConnector: Connector = {
+ id: "lime-passes",
+ name: "Lime passes",
+ description: "Track prepaid Lime passes separately. Pass costs are included in total mobility spend.",
+ kind: "import",
+ configSchema: [
+   { key: "section_upload", label: "Upload passes", type: "section" as const },
+   {
+     key: "csvFormat",
+     label: "CSV format",
+     type: "text",
+     help: 'Expected columns: day, cost, cost_currency. Example: 2026-06-01, 10.00, EUR',
+     optional: true,
+   },
+ ],
+ async import(ctx, data) {
+   const rows: Record<string, unknown>[] = [];
+   const lines = String(data).trim().split("\n");
+    
+   for (const line of lines) {
+     if (!line.trim()) continue;
+     const [dayStr, costStr, currencyStr] = line.split(",").map((s) => s.trim());
+     if (!dayStr || !costStr) continue;
+
+     const day = dayStr;
+     const cost = parseFloat(costStr);
+     const currency = (currencyStr || "EUR").toUpperCase();
+
+     if (!Number.isFinite(cost) || cost < 0) continue;
+
+     const eurRate: Record<string, number> = {
+       EUR: 1,
+       CZK: 0.0402,
+       USD: 0.93,
+       GBP: 1.18,
+       PLN: 0.235,
+       CHF: 1.04,
+       SEK: 0.086,
+       NOK: 0.086,
+       DKK: 0.134,
+       HUF: 0.0025,
+     };
+     const rate = eurRate[currency] ?? 1;
+     const costEur = Math.round(cost * rate * 100) / 100;
+
+     rows.push({
+       day,
+       cost,
+       cost_currency: currency,
+       cost_eur: costEur,
+     });
+   }
+
+   if (rows.length > 0) {
+     await ctx.db.insert("mobility_lime_pass", rows);
+   }
+
+   return {
+     inserted: rows.length,
+     message: `Imported ${rows.length} Lime pass entries.`,
+   };
+ },
+};
+
+mobility.connectors = [inboxMobilityScan, limePassConnector];
 
 export default mobility;

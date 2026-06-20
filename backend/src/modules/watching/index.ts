@@ -613,6 +613,18 @@ const watching: LifeStackModule = {
       },
     },
     {
+      id: "watchlist-count",
+      title: "Watchlist total",
+      type: "metric",
+      size: "sm",
+      async query(ctx) {
+        const rows = await ctx.db.query<{ v: number }>(
+          `SELECT toInt32(count()) AS v FROM watch_watchlist FINAL`,
+        );
+        return { value: rows[0]?.v ?? 0, unit: "items" };
+      },
+    },
+    {
       id: "watchlist",
       title: "On your watchlist",
       type: "list",

@@ -2,6 +2,7 @@
   import type { ConnectorView } from "$lib/types";
   import { invalidateAll } from "$app/navigation";
   import { action } from "$lib/api";
+  import { providerLogoUrl } from "$lib/branding";
   import { syncLabel, syncFailed } from "$lib/format";
 
   let { moduleId, connector, accent }: { moduleId: string; connector: ConnectorView; accent: string } =
@@ -109,6 +110,21 @@
   let authCode = $state("");
   let editCreds = $state(false);
   let reauth = $state(false);
+  let failedIcons = $state<Record<string, boolean>>({});
+
+  const iconForField = (iconKey: string, label: string, fallback?: string) =>
+    failedIcons[iconKey] ? null : (providerLogoUrl(label) ?? fallback ?? null);
+
+  const fieldIconFallbackText = (label: string) =>
+    label
+      .replace(/^scan\s+/i, "")
+      .replace(/\s+(rides|orders|receipts)$/i, "")
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean)
+      .slice(0, 2)
+      .map((w) => w[0]?.toUpperCase() ?? "")
+      .join("") || "•";
 
   const saveCreds = () =>
     run(async () => {
@@ -151,6 +167,23 @@
     }, "Connecting…");
 
   const disconnectFuelio = () =>
+    run(async () => {
+      await action(`/modules/${moduleId}/connectors/${connector.id}/authorize`, "POST", {
+        disconnect: true,
+      });
+      status = "Disconnected";
+    }, "Disconnecting…");
+
+  const connectMail = () =>
+    run(async () => {
+      await action(`/modules/${moduleId}/connectors/${connector.id}/authorize`, "POST", { code: authCode });
+      if (!connector.enabled)
+        await action(`/modules/${moduleId}/connectors/${connector.id}/enable`);
+      authCode = "";
+      status = "Connected";
+    }, "Connecting…");
+
+  const disconnectMail = () =>
     run(async () => {
       await action(`/modules/${moduleId}/connectors/${connector.id}/authorize`, "POST", {
         disconnect: true,
@@ -294,8 +327,18 @@
             <div class="section-header">{f.label}</div>
           {:else}
             <label class="field" class:field--icon={f.type === "boolean" && f.icon}>
-              {#if f.type === "boolean" && f.icon}
-                <img src={f.icon} alt={f.label} class="field-icon" />
+              {#if f.type === "boolean"}
+                {@const iconKey = `icon:${connector.id}:${f.key}`}
+                {#if iconForField(iconKey, f.label, f.icon)}
+                  <img
+                    src={iconForField(iconKey, f.label, f.icon) ?? ""}
+                    alt={f.label}
+                    class="field-icon"
+                    onerror={() => (failedIcons = { ...failedIcons, [iconKey]: true })}
+                  />
+                {:else}
+                  <span class="field-icon-fallback" aria-hidden="true">{fieldIconFallbackText(f.label)}</span>
+                {/if}
               {/if}
               <span class="flabel">{f.label}</span>
               {#if f.type === "boolean"}
@@ -336,6 +379,68 @@
         <button class="btn btn--ghost tk-danger" onclick={disconnectFuelio} disabled={busy}>Disconnect</button>
       </div>
     </div>
+  {:else if connector.hasAuthorize && (connector.id === "gmail" || connector.id === "outlook")}
+    <div class="tk">
+      <p class="tk-hint">
+        Save your {connector.name} OAuth app credentials, authorize in a new tab, then paste the
+        code from the callback page to connect.
+      </p>
+      <div class="fields">
+        {#each connector.config as f (f.key)}
+          {#if f.type === "section"}
+            <div class="section-header">{f.label}</div>
+          {:else}
+            <label class="field">
+              <span class="flabel">{f.label}</span>
+              {#if f.secret}
+                <input
+                  type="password"
+                  placeholder={f.hasValue ? "•••••••• (set)" : "not set"}
+                  bind:value={values[f.key]}
+                  autocomplete="off"
+                />
+              {:else}
+                <input
+                  type={f.type === "number" ? "number" : "text"}
+                  bind:value={values[f.key]}
+                  autocomplete="off"
+                  spellcheck="false"
+                />
+              {/if}
+              {#if f.help}<span class="help">{f.help}</span>{/if}
+            </label>
+          {/if}
+        {/each}
+      </div>
+      {#if connector.authorizeUrl}
+        <div class="tk-authrow">
+          <a class="authlink" href={connector.authorizeUrl} target="_blank" rel="noopener noreferrer">
+            Authorize on {connector.name}
+            <span class="go" aria-hidden="true">&rarr;</span>
+          </a>
+          <button class="btn btn--ghost" onclick={save} disabled={busy}>Save config</button>
+        </div>
+      {:else}
+        <p class="tk-hint">
+          Add and save OAuth Client ID, Client secret, and Redirect URI to generate the authorize
+          link.
+        </p>
+        <div class="tk-actions">
+          <button class="btn btn--ghost" onclick={save} disabled={busy}>Save config</button>
+        </div>
+      {/if}
+      <div class="tk-pin">
+        <input
+          class="tk-pininput"
+          placeholder="Paste authorization code"
+          bind:value={authCode}
+          autocomplete="off"
+          spellcheck="false"
+        />
+        <button class="btn" onclick={connectMail} disabled={busy || !authCode.trim()}>Connect</button>
+        <button class="btn btn--ghost tk-danger" onclick={disconnectMail} disabled={busy}>Disconnect</button>
+      </div>
+    </div>
   {:else if connector.config.length}
     <div class="fields">
       {#each connector.config as f (f.key)}
@@ -343,8 +448,18 @@
          <div class="section-header">{f.label}</div>
        {:else}
          <label class="field" class:field--icon={f.type === "boolean" && f.icon}>
-           {#if f.type === "boolean" && f.icon}
-             <img src={f.icon} alt={f.label} class="field-icon" />
+           {#if f.type === "boolean"}
+             {@const iconKey = `icon:${connector.id}:${f.key}`}
+             {#if iconForField(iconKey, f.label, f.icon)}
+               <img
+                 src={iconForField(iconKey, f.label, f.icon) ?? ""}
+                 alt={f.label}
+                 class="field-icon"
+                 onerror={() => (failedIcons = { ...failedIcons, [iconKey]: true })}
+               />
+             {:else}
+               <span class="field-icon-fallback" aria-hidden="true">{fieldIconFallbackText(f.label)}</span>
+             {/if}
            {/if}
            <span class="flabel">{f.label}</span>
            {#if f.type === "boolean"}
@@ -368,7 +483,12 @@
 
   <div class="row">
     <div class="left">
-      {#if connector.enabled && connector.id !== "trakt"}
+      {#if connector.enabled &&
+        connector.id !== "trakt" &&
+        connector.id !== "fuelio-dropbox" &&
+        connector.id !== "fuelio-google-drive" &&
+        connector.id !== "gmail" &&
+        connector.id !== "outlook"}
         {#if connector.config.length}
           <button class="btn btn--ghost" onclick={save} disabled={busy}>Save config</button>
         {/if}
@@ -495,11 +615,25 @@
     border: 1px solid var(--border-strong);
   }
   .field--icon .field-icon {
-    width: 20px;
-    height: 20px;
+    width: 22px;
+    height: 22px;
     object-fit: contain;
     flex-shrink: 0;
-    opacity: 0.8;
+    opacity: 1;
+  }
+  .field--icon .field-icon-fallback {
+    width: 22px;
+    height: 22px;
+    display: inline-grid;
+    place-items: center;
+    flex-shrink: 0;
+    border-radius: 50%;
+    border: 1px solid var(--border-strong);
+    background: color-mix(in oklab, var(--accent) 18%, var(--surface-2));
+    color: var(--text);
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
   }
   .field--icon .flabel {
     flex: 1;

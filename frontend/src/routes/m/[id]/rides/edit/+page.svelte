@@ -58,7 +58,6 @@
       await action<{ ok: boolean; message?: string }>(`/modules/mobility/rides/update`, "PUT", {
         original,
         patch: {
-          day: newDay,
           started_at: startedAt ? startedAt.replace("T", " ") + ":00" : "",
           provider,
           type: rideType,

@@ -139,6 +139,7 @@ export interface ConnectorView {
   enabled: boolean;
   hasSync: boolean;
   hasAuthorize?: boolean;
+  authorizeUrl?: string | null;
   hasImport: boolean;
   syncIntervalMinutes: number | null;
   config: ConfigField[];

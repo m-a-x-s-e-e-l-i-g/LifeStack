@@ -3,17 +3,17 @@ import type { Connector, ConnectorContext, LifeStackModule } from "../../core/ty
 const inboxGroceries: Connector = {
   id: "inbox-groceries",
   name: "Email receipts",
-  description: "Auto-scan email receipts from Albert Heijn, Jumbo, and other grocers.",
-  kind: "api",
-  syncIntervalMinutes: 30,
+  description: "Control whether inbox scanning imports grocery receipts into this module.",
+  kind: "manual",
   configSchema: [
-    { key: "scanAlbertHeijn", label: "Scan Albert Heijn receipts", type: "boolean", default: true, icon: "https://upload.wikimedia.org/wikipedia/commons/thumb/1/1c/Albert_Heijn_logo.svg/1024px-Albert_Heijn_logo.svg.png" },
-    { key: "scanJumbo", label: "Scan Jumbo receipts", type: "boolean", default: true, icon: "https://upload.wikimedia.org/wikipedia/commons/thumb/c/cc/Jumbo_supermarkt_logo.svg/1024px-Jumbo_supermarkt_logo.svg.png" },
+    {
+      key: "scanGroceries",
+      label: "Scan grocery receipts",
+      type: "boolean",
+      default: true,
+      help: "Albert Heijn, Jumbo, and other grocers",
+    },
   ],
-  async sync(ctx) {
-    // Synced by inbox module; this is a view-only connector
-    return { message: "Grocery receipts synced via inbox module." };
-  },
 };
 
 const groceries: LifeStackModule = {
