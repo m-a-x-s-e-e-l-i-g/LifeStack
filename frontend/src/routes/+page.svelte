@@ -21,6 +21,15 @@
     attachmentCount?: number;
     pendingActions?: PendingChange[];
   };
+  type PendingRequest = {
+    content: string;
+    attachments: UploadImage[];
+    turnIndex: number;
+  };
+  type ArmedApproval = {
+    turnIndex: number;
+    changeId: string;
+  };
 
   let thread = $state<Turn[]>([]);
   let input = $state("");
@@ -31,6 +40,9 @@
   let picker: HTMLInputElement | null = $state(null);
   let pendingImages = $state<UploadImage[]>([]);
   let persistenceReady = $state(false);
+  let pendingRequest = $state<PendingRequest | null>(null);
+  let canRetry = $state(false);
+  let armedApproval = $state<ArmedApproval | null>(null);
 
   function isTurn(value: unknown): value is Turn {
     return (
@@ -67,6 +79,7 @@
 
   const promptFor: Record<string, string> = {
     watching: "How many films and episodes have I watched this year?",
+    observations: "Show my top observed species and monthly observation trend.",
     finance: "What were my biggest spending categories last month?",
     energy: "Show my electricity cost by month this year.",
     fuel: "What is my average fuel economy in L/100km?",
@@ -159,25 +172,62 @@
     if (picker) picker.value = "";
   }
 
+  function classifyFailure(error: unknown): { message: string; retryable: boolean } {
+    const raw = error instanceof Error ? error.message : "";
+    const lower = raw.toLowerCase();
+    if (
+      /failed to fetch|network|econn|enotfound|backend unreachable|offline|502|503|504/.test(lower)
+    ) {
+      return {
+        message: "Backend is unreachable right now. Check your backend service, then retry.",
+        retryable: true,
+      };
+    }
+    if (/timeout|timed out|etimedout/.test(lower)) {
+      return {
+        message: "The model timed out before responding. Retry in a few seconds.",
+        retryable: true,
+      };
+    }
+    if (/401|403|unauthorized|forbidden|api key|credential/.test(lower)) {
+      return {
+        message: "Model credentials were rejected. Check the assistant settings and try again.",
+        retryable: false,
+      };
+    }
+    if (raw.trim()) {
+      return { message: raw, retryable: true };
+    }
+    return {
+      message: "The assistant could not respond. Retry in a moment.",
+      retryable: true,
+    };
+  }
+
+  function serializeHistory(turns: Turn[]): { role: Turn["role"]; content: string }[] {
+    return turns.map((t) => ({ role: t.role, content: t.content }));
+  }
+
   async function send(text: string) {
     const content = text.trim();
     if ((!content && pendingImages.length === 0) || busy) return;
     errorText = null;
-    const attachments = pendingImages;
+    canRetry = false;
+    armedApproval = null;
+    const attachments = [...pendingImages];
+    const previousThread = thread;
+    const turnIndex = previousThread.length;
     const userTurn: Turn = { role: "user", content, attachmentCount: attachments.length };
-    thread = [...thread, userTurn];
+    thread = [...previousThread, userTurn];
+    pendingRequest = { content, attachments, turnIndex };
     input = "";
     pendingImages = [];
     if (box) box.style.height = "auto";
     busy = true;
     scrollDown();
     try {
-      const history = thread.map((t) => ({
-        role: t.role,
-        content: t.content,
-      }));
       const payload = [
-        ...history,
+        ...serializeHistory(previousThread),
         {
           role: "user",
           content,
@@ -186,8 +236,60 @@
       ];
       const res = await action<ChatResponse>("/chat", "POST", { messages: payload });
       thread = [...thread, { role: "assistant", content: res.reply, steps: res.steps, pendingActions: res.pendingActions }];
+      pendingRequest = null;
     } catch (e) {
-      errorText = e instanceof Error ? e.message : "The assistant could not respond.";
+      const failure = classifyFailure(e);
+      errorText = failure.message;
+      canRetry = failure.retryable;
+    } finally {
+      busy = false;
+      scrollDown();
+    }
+  }
+
+  async function retryLast() {
+    if (busy || !pendingRequest) return;
+    errorText = null;
+    canRetry = false;
+    busy = true;
+    scrollDown();
+    const request = pendingRequest;
+    try {
+      const baseTurns = thread.slice(0, request.turnIndex);
+      const payload = [
+        ...serializeHistory(baseTurns),
+        {
+          role: "user",
+          content: request.content,
+          ...(request.attachments.length ? { attachments: request.attachments } : {}),
+        },
+      ];
+      const res = await action<ChatResponse>("/chat", "POST", { messages: payload });
+      const hasUserTurn = thread[request.turnIndex]?.role === "user";
+      const nextThread = hasUserTurn
+        ? thread
+        : [
+            ...baseTurns,
+            {
+              role: "user",
+              content: request.content,
+              attachmentCount: request.attachments.length,
+            } satisfies Turn,
+          ];
+      thread = [
+        ...nextThread,
+        {
+          role: "assistant",
+          content: res.reply,
+          steps: res.steps,
+          pendingActions: res.pendingActions,
+        },
+      ];
+      pendingRequest = null;
+    } catch (e) {
+      const failure = classifyFailure(e);
+      errorText = failure.message;
+      canRetry = failure.retryable;
     } finally {
       busy = false;
       scrollDown();
@@ -204,8 +306,11 @@
   function reset() {
     thread = [];
     errorText = null;
+    canRetry = false;
     input = "";
     pendingImages = [];
+    pendingRequest = null;
+    armedApproval = null;
   }
 
   function columns(rows: Record<string, unknown>[]): string[] {
@@ -277,6 +382,32 @@
     return fallback;
   }
 
+  function isApprovalArmed(turnIndex: number, changeId: string): boolean {
+    return armedApproval?.turnIndex === turnIndex && armedApproval?.changeId === changeId;
+  }
+
+  function armApproval(turnIndex: number, changeId: string) {
+    armedApproval = { turnIndex, changeId };
+  }
+
+  function clearArmedApproval() {
+    armedApproval = null;
+  }
+
+  function approvalRiskLabel(change: PendingChange): string {
+    return change.kind === "delete_records" ? "Delete request" : "Write request";
+  }
+
+  function approvalConfirmCopy(change: PendingChange): string {
+    if (change.kind === "delete_records") {
+      return `This will delete records in ${change.target} that match the shown filters.`;
+    }
+    const total = Array.isArray(change.rows) ? change.rows.length : 0;
+    return total > 0
+      ? `This will add ${total} row${total === 1 ? "" : "s"} to ${change.target}.`
+      : `This will write data to ${change.target}.`;
+  }
+
   async function approveChange(turnIndex: number, change: PendingChange) {
     if (busy) return;
     busy = true;
@@ -299,6 +430,7 @@
       );
       thread = [...thread, { role: "assistant", content: applied }];
       await invalidateAll();
+      armedApproval = null;
     } catch (e) {
       errorText = e instanceof Error ? e.message : "Could not approve change.";
     } finally {
@@ -307,6 +439,7 @@
   }
 
   function declineChange(turnIndex: number, changeId: string) {
+    if (isApprovalArmed(turnIndex, changeId)) armedApproval = null;
     thread = thread.map((turn, i) =>
       i === turnIndex
         ? { ...turn, pendingActions: (turn.pendingActions ?? []).filter((c) => c.id !== changeId) }
@@ -409,14 +542,19 @@
                   <div class="approvals">
                     <p class="approvals-title">Awaiting approval</p>
                     {#each t.pendingActions as change, ci (change.id)}
-                      <div class="approval">
+                      <div class="approval" class:approval--danger={change.kind === "delete_records"}>
                         <div class="approval-text">
                           <strong>{change.summary}</strong>
                           <p>{change.kind === "write_records" ? "Import" : "Delete"} proposal for {change.target}</p>
+                          <p class="approval-risk" class:approval-risk--danger={change.kind === "delete_records"}>
+                            {approvalRiskLabel(change)}
+                          </p>
                           {#if approvalPreview(change)}
                             {@const preview = approvalPreview(change) ?? { title: "", columns: [], rows: [], total: 0 }}
-                            <div class="approval-preview">
-                              <p class="approval-preview-title">{preview.title}</p>
+                            <details class="approval-preview">
+                              <summary>
+                                {preview.title} ({preview.rows.length} of {preview.total})
+                              </summary>
                               <div class="approval-preview-wrap">
                                 <table class="approval-preview-table">
                                   <thead>
@@ -438,16 +576,36 @@
                                   +{preview.total - preview.rows.length} more row{preview.total - preview.rows.length === 1 ? "" : "s"}
                                 </p>
                               {/if}
-                            </div>
+                            </details>
                           {/if}
                         </div>
                         <div class="approval-actions">
-                          <button class="btn btn--primary" type="button" onclick={() => approveChange(i, change)} disabled={busy}>
-                            Approve
-                          </button>
-                          <button class="btn" type="button" onclick={() => declineChange(i, change.id)} disabled={busy}>
-                            Decline
-                          </button>
+                          {#if isApprovalArmed(i, change.id)}
+                            <p class="approval-confirm-copy">{approvalConfirmCopy(change)}</p>
+                            {#if change.kind === "delete_records"}
+                              <button class="btn btn--danger" type="button" onclick={() => approveChange(i, change)} disabled={busy}>
+                                Confirm delete
+                              </button>
+                            {:else}
+                              <button class="btn btn--primary" type="button" onclick={() => approveChange(i, change)} disabled={busy}>
+                                Confirm import
+                              </button>
+                            {/if}
+                            <button class="btn" type="button" onclick={clearArmedApproval} disabled={busy}>Cancel</button>
+                          {:else}
+                            {#if change.kind === "delete_records"}
+                              <button class="btn btn--danger" type="button" onclick={() => armApproval(i, change.id)} disabled={busy}>
+                                Review delete
+                              </button>
+                            {:else}
+                              <button class="btn btn--primary" type="button" onclick={() => armApproval(i, change.id)} disabled={busy}>
+                                Review import
+                              </button>
+                            {/if}
+                            <button class="btn" type="button" onclick={() => declineChange(i, change.id)} disabled={busy}>
+                              Decline
+                            </button>
+                          {/if}
                         </div>
                       </div>
                     {/each}
@@ -470,6 +628,11 @@
             <div class="turn bot">
               <p class="who">Assistant</p>
               <p class="fail">{errorText}</p>
+              {#if canRetry && pendingRequest}
+                <button class="btn btn--ghost retry" type="button" onclick={retryLast} disabled={busy}>
+                  Retry last request
+                </button>
+              {/if}
             </div>
           {/if}
         </div>
@@ -690,6 +853,9 @@
     color: var(--neg);
     font-size: 14.5px;
   }
+  .retry {
+    margin-top: var(--s3);
+  }
 
   /* Query disclosure ------------------------------------------------------ */
   .work {
@@ -812,8 +978,7 @@
   /* Composer -------------------------------------------------------------- */
   .composer {
     border-top: 1px solid var(--border);
-    background: color-mix(in oklab, var(--bg) 88%, transparent);
-    backdrop-filter: blur(8px);
+    background: color-mix(in oklab, var(--surface) 98%, var(--bg));
     padding: var(--s4) var(--s6) var(--s5);
   }
   .composer-col {
@@ -919,8 +1084,10 @@
   }
   .hint {
     margin: var(--s2) 0 0;
-    font-size: 11.5px;
-    color: var(--text-faint);
+    max-width: 60ch;
+    font-size: 13px;
+    line-height: 1.45;
+    color: var(--text);
   }
   .attach-summary {
     margin: var(--s2) 0 0;
@@ -944,13 +1111,21 @@
   }
   .approval {
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     justify-content: space-between;
     gap: var(--s4);
     padding-top: var(--s3);
   }
+  .approval--danger {
+    background: color-mix(in oklab, var(--neg) 7%, var(--bg-sunken));
+    border-radius: var(--r-sm);
+    padding: var(--s3);
+  }
   .approval + .approval {
     border-top: 1px solid var(--border);
+  }
+  .approval + .approval.approval--danger {
+    margin-top: var(--s3);
   }
   .approval-text strong {
     display: block;
@@ -961,27 +1136,80 @@
     font-size: 12.5px;
     color: var(--text-dim);
   }
+  .approval-risk {
+    display: inline-flex;
+    margin-top: var(--s2);
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+    color: var(--text-faint);
+    border: 1px solid var(--border);
+    background: var(--surface);
+  }
+  .approval-risk--danger {
+    color: var(--neg);
+    border-color: color-mix(in oklab, var(--neg) 38%, var(--border));
+    background: color-mix(in oklab, var(--neg) 10%, var(--surface));
+  }
   .approval-actions {
     display: flex;
+    flex-direction: column;
+    align-items: flex-end;
     gap: var(--s2);
     flex: none;
     align-self: flex-start;
   }
+  .approval-confirm-copy {
+    margin: 0;
+    max-width: 30ch;
+    font-size: 12px;
+    line-height: 1.45;
+    color: var(--text-dim);
+    text-align: right;
+  }
+  .btn--danger {
+    background: color-mix(in oklab, var(--neg) 18%, var(--surface-2));
+    border-color: color-mix(in oklab, var(--neg) 52%, var(--border));
+    color: var(--text);
+  }
+  .btn--danger:hover {
+    background: color-mix(in oklab, var(--neg) 26%, var(--surface-2));
+    border-color: color-mix(in oklab, var(--neg) 62%, var(--border));
+  }
   .approval-preview {
     margin-top: var(--s3);
-  }
-  .approval-preview-title {
-    margin: 0 0 6px;
-    font-size: 11px;
-    color: var(--text-faint);
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
-  }
-  .approval-preview-wrap {
-    overflow-x: auto;
     border: 1px solid var(--border);
     border-radius: 8px;
     background: var(--surface);
+    overflow: hidden;
+  }
+  .approval-preview summary {
+    list-style: none;
+    cursor: pointer;
+    padding: 7px 10px;
+    font-size: 11.5px;
+    color: var(--text-faint);
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    background: var(--bg-sunken);
+  }
+  .approval-preview summary::-webkit-details-marker {
+    display: none;
+  }
+  .approval-preview summary::before {
+    content: "›";
+    display: inline-block;
+    margin-right: 6px;
+    transition: transform 140ms ease;
+  }
+  .approval-preview[open] summary::before {
+    transform: rotate(90deg);
+  }
+  .approval-preview-wrap {
+    overflow-x: auto;
   }
   .approval-preview-table {
     width: 100%;

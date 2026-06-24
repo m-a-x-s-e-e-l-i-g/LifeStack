@@ -83,11 +83,12 @@ the most on last month?"*, or *"Show my electricity cost by month."*
 ## Modules
 
 Each module is a **domain** that owns its schema, statistics, and accent color. Data flows
-in through **connectors** (pluggable sources). Ships with six modules:
+in through **connectors** (pluggable sources). Core modules include:
 
 | Module          | Domain              | Connectors                  | Sample statistics |
 |-----------------|---------------------|-----------------------------|-------------------|
 | **Movies & TV** | Everything you watch | Trakt (API)                 | Watched summary (last 30 days and all time, shows and movies with watch time), unique series and movies, plays per month, watch calendar, top genres and shows, ratings, watchlist, collection |
+| **Nature observations** | Biodiversity sightings | GBIF / Observation.org (API) | Total observations, species count, monthly activity, class split, observation calendar, recent sightings |
 | **Finance**     | Bank transfers       | Assistant screenshot import | Monthly cash flow, spend by category, balance trend, top merchants |
 | **Energy**      | Home electricity     | Tibber (API), assistant     | kWh per month, day vs night split, cost, usage calendar |
 | **Fuel**        | Fuel consumption     | Assistant screenshot import | L/100km economy, price/L trend, cost per month, total spend |
@@ -96,7 +97,8 @@ in through **connectors** (pluggable sources). Ships with six modules:
 
 The **Trakt** connector performs a **full sync**: watch history (movies and episodes),
 ratings (movies, shows, seasons, episodes), watchlist, collection, and your profile stats.
-**Tibber** is a real, working energy connector. For providers without APIs or export files,
+**Tibber** is a real, working energy connector, and the **GBIF** connector can import your
+Observation.org records by user ID. For providers without APIs or export files,
 upload screenshots in the assistant and ask it to import them. The backend dedupes repeated
 uploads automatically.
 
@@ -162,8 +164,9 @@ and you only need to authorize and paste the PIN.
                        │    └─ routes     REST API + /api/chat       │
                        │                                            │
                        │   modules/                                 │
-                       │    ├─ watching ├─ finance  ├─ fuel         │
-                       │    ├─ energy   ├─ mobility └─ food         │
+                       │    ├─ watching ├─ observations ├─ finance   │
+                       │    ├─ energy   ├─ fuel         ├─ mobility  │
+                       │    └─ food     ··· (more modules)           │
                        │       module: migrations · widgets         │
                        │       connectors: trakt · tibber            │
                        └───────────────────────┬────────────────────┘
@@ -285,6 +288,7 @@ All configuration is environment variables (see `.env.example`):
 | `TRAKT_CLIENT_ID` / `TRAKT_CLIENT_SECRET` | empty | Movies & TV: Trakt app credentials (see [Connecting Trakt](#connecting-trakt)) |
 | `TRAKT_ACCESS_TOKEN` | empty                       | Movies & TV: optional, a Trakt token you already minted (skips the PIN) |
 | `TIBBER_TOKEN`       | empty                       | Energy: Tibber connector token |
+| `OBSERVATION_ORG_USER_ID` | empty                 | Nature observations: numeric profile ID used for GBIF sync (`observation.org/users/<id>/`) |
 
 The assistant and connector secrets can also be set at runtime in the Settings UI, which
 persists them in ClickHouse (env values are the fallback default).
@@ -298,7 +302,7 @@ LifeStack/
 ├─ backend/                  Fastify aggregator + module system
 │  └─ src/
 │     ├─ core/               types · db · registry · scheduler · routes · ai
-│     └─ modules/            watching · finance · energy · fuel · mobility · food
+│     └─ modules/            watching · observations · finance · energy · fuel · mobility · food · ...
 │                            (each module owns connectors + widgets)
 ├─ frontend/                 SvelteKit dashboard + assistant
 │  └─ src/

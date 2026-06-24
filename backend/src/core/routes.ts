@@ -184,6 +184,248 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     return { module: meta(m), enabled: true, widgets };
   });
 
+  app.get("/api/modules/observations/insights", async (_req, reply) => {
+    const m = getModule("observations");
+    if (!m) return notFound(reply, "module");
+
+    if (!(await isModuleEnabled(m.id))) {
+      return {
+        module: meta(m),
+        enabled: false,
+        summary: null,
+        monthly: [],
+        countries: [],
+        map: { totalMapped: 0, returned: 0, points: [] },
+        topSpecies: [],
+        streaks: { current: 0, latest: 0, longest: 0 },
+        busiestDay: null,
+      };
+    }
+
+    const ctx = buildModuleContext(m);
+    const [
+      summaryRows,
+      monthlyRows,
+      countryRows,
+      mapRows,
+      topSpeciesRows,
+      dailyRows,
+    ] = await Promise.all([
+      ctx.db.query<{
+        total_observations: number;
+        total_species: number;
+        countries_observed: number;
+        mapped_observations: number;
+        active_days: number;
+        first_observed: string;
+        last_observed: string;
+      }>(
+        `SELECT
+           toInt32(count()) AS total_observations,
+           toInt32(uniqExactIf(if(species != '', species, scientific_name), species != '' OR scientific_name != '')) AS total_species,
+           toInt32(uniqExactIf(if(country != '', country, if(country_code != '', country_code, 'Unknown')), country != '' OR country_code != '')) AS countries_observed,
+           toInt32(countIf(decimal_latitude BETWEEN -90 AND 90 AND decimal_longitude BETWEEN -180 AND 180 AND (abs(decimal_latitude) > 0 OR abs(decimal_longitude) > 0))) AS mapped_observations,
+           toInt32(uniqExact(event_date)) AS active_days,
+           if(count() = 0, '', toString(min(event_date))) AS first_observed,
+           if(count() = 0, '', toString(max(event_date))) AS last_observed
+         FROM observation_occurrence FINAL`,
+      ),
+      ctx.db.query<{ month: string; observations: number; species: number }>(
+        `SELECT
+           formatDateTime(toStartOfMonth(event_date), '%Y-%m') AS month,
+           toInt32(count()) AS observations,
+           toInt32(uniqExactIf(if(species != '', species, scientific_name), species != '' OR scientific_name != '')) AS species
+         FROM observation_occurrence FINAL
+         WHERE event_date >= toStartOfMonth(today()) - INTERVAL 11 MONTH
+         GROUP BY month
+         ORDER BY month ASC`,
+      ),
+      ctx.db.query<{ country: string; observations: number; species: number }>(
+        `SELECT
+           country,
+           toInt32(count()) AS observations,
+           toInt32(uniqExactIf(species_name, species_name != '')) AS species
+         FROM (
+           SELECT
+             if(country != '', country, if(country_code != '', country_code, 'Unknown')) AS country,
+             if(species != '', species, scientific_name) AS species_name
+           FROM observation_occurrence FINAL
+         )
+         GROUP BY country
+         ORDER BY observations DESC, country ASC
+         LIMIT 40`,
+      ),
+      ctx.db.query<{ lat: number; lon: number; species: string; country: string; date: string }>(
+        `SELECT
+           toFloat64(decimal_latitude) AS lat,
+           toFloat64(decimal_longitude) AS lon,
+           if(species != '', species, if(scientific_name != '', scientific_name, 'Unknown species')) AS species,
+           if(country != '', country, if(country_code != '', country_code, 'Unknown')) AS country,
+           toString(event_date) AS date
+         FROM observation_occurrence FINAL
+         WHERE decimal_latitude BETWEEN -90 AND 90
+           AND decimal_longitude BETWEEN -180 AND 180
+           AND (abs(decimal_latitude) > 0 OR abs(decimal_longitude) > 0)
+         ORDER BY event_date DESC, gbif_id DESC
+         LIMIT 2500`,
+      ),
+      ctx.db.query<{ species: string; observations: number }>(
+        `SELECT
+           if(species != '', species, scientific_name) AS species,
+           toInt32(count()) AS observations
+         FROM observation_occurrence FINAL
+         WHERE species != '' OR scientific_name != ''
+         GROUP BY species
+         ORDER BY observations DESC, species ASC
+         LIMIT 12`,
+      ),
+      ctx.db.query<{ date: string; observations: number }>(
+        `SELECT
+           toString(event_date) AS date,
+           toInt32(count()) AS observations
+         FROM observation_occurrence FINAL
+         WHERE event_date >= today() - INTERVAL 365 DAY
+         GROUP BY event_date
+         ORDER BY event_date ASC`,
+      ),
+    ]);
+
+    const summaryRow = summaryRows[0] ?? {
+      total_observations: 0,
+      total_species: 0,
+      countries_observed: 0,
+      mapped_observations: 0,
+      active_days: 0,
+      first_observed: "",
+      last_observed: "",
+    };
+
+    const monthNames = [
+      "Jan",
+      "Feb",
+      "Mar",
+      "Apr",
+      "May",
+      "Jun",
+      "Jul",
+      "Aug",
+      "Sep",
+      "Oct",
+      "Nov",
+      "Dec",
+    ];
+
+    const monthlyByKey = new Map(
+      monthlyRows.map((row) => [row.month, { observations: Number(row.observations ?? 0), species: Number(row.species ?? 0) }]),
+    );
+
+    const now = new Date();
+    const startMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 11, 1));
+    const monthly = [];
+    for (let i = 0; i < 12; i++) {
+      const dt = new Date(Date.UTC(startMonth.getUTCFullYear(), startMonth.getUTCMonth() + i, 1));
+      const key = `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, "0")}`;
+      const values = monthlyByKey.get(key);
+      monthly.push({
+        month: key,
+        label: `${monthNames[dt.getUTCMonth()]} ${String(dt.getUTCFullYear()).slice(2)}`,
+        observations: values?.observations ?? 0,
+        species: values?.species ?? 0,
+      });
+    }
+
+    const daySet = new Set<string>();
+    const dayMs = 86_400_000;
+    let longestStreak = 0;
+    let run = 0;
+    let prevMs: number | null = null;
+
+    for (const row of dailyRows) {
+      const day = String(row.date ?? "").slice(0, 10);
+      const ms = Date.parse(`${day}T00:00:00Z`);
+      if (!day || !Number.isFinite(ms)) continue;
+      daySet.add(day);
+      if (prevMs !== null && ms - prevMs === dayMs) run += 1;
+      else run = 1;
+      if (run > longestStreak) longestStreak = run;
+      prevMs = ms;
+    }
+
+    let currentStreak = 0;
+    let cursor = new Date();
+    cursor.setUTCHours(0, 0, 0, 0);
+    while (daySet.has(cursor.toISOString().slice(0, 10))) {
+      currentStreak += 1;
+      cursor = new Date(cursor.getTime() - dayMs);
+    }
+
+    let latestStreak = 0;
+    const latestDay = dailyRows[dailyRows.length - 1]?.date?.slice(0, 10);
+    if (latestDay) {
+      let latestCursor = Date.parse(`${latestDay}T00:00:00Z`);
+      while (Number.isFinite(latestCursor)) {
+        const iso = new Date(latestCursor).toISOString().slice(0, 10);
+        if (!daySet.has(iso)) break;
+        latestStreak += 1;
+        latestCursor -= dayMs;
+      }
+    }
+
+    const busiestDay =
+      dailyRows.length === 0
+        ? null
+        : dailyRows.reduce<{ date: string; observations: number } | null>((best, row) => {
+            const observations = Number(row.observations ?? 0);
+            const date = String(row.date ?? "").slice(0, 10);
+            if (!date) return best;
+            if (!best || observations > best.observations) return { date, observations };
+            return best;
+          }, null);
+
+    const mapPoints = mapRows.map((row) => ({
+      lat: Number(row.lat),
+      lon: Number(row.lon),
+      species: String(row.species ?? "Unknown species"),
+      country: String(row.country ?? "Unknown"),
+      date: String(row.date ?? "").slice(0, 10),
+    }));
+
+    return {
+      module: meta(m),
+      enabled: true,
+      summary: {
+        totalObservations: Number(summaryRow.total_observations ?? 0),
+        totalSpecies: Number(summaryRow.total_species ?? 0),
+        countriesObserved: Number(summaryRow.countries_observed ?? 0),
+        mappedObservations: Number(summaryRow.mapped_observations ?? 0),
+        activeDays: Number(summaryRow.active_days ?? 0),
+        firstObserved: summaryRow.first_observed || null,
+        lastObserved: summaryRow.last_observed || null,
+      },
+      monthly,
+      countries: countryRows.map((row) => ({
+        country: String(row.country ?? "Unknown"),
+        observations: Number(row.observations ?? 0),
+        species: Number(row.species ?? 0),
+      })),
+      map: {
+        totalMapped: Number(summaryRow.mapped_observations ?? 0),
+        returned: mapPoints.length,
+        points: mapPoints,
+      },
+      topSpecies: topSpeciesRows.map((row) => ({
+        species: String(row.species ?? "Unknown species"),
+        observations: Number(row.observations ?? 0),
+      })),
+      streaks: {
+        current: currentStreak,
+        latest: latestStreak,
+        longest: longestStreak,
+      },
+      busiestDay,
+    };
+  });
+
   app.post<{ Params: { id: string } }>("/api/modules/:id/enable", async (req, reply) => {
     const m = getModule(req.params.id);
     if (!m) return notFound(reply, "module");

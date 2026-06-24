@@ -30,6 +30,28 @@
   const onChat = $derived(path === "/");
   const onOverview = $derived(path === "/overview");
   const onSettings = $derived(path.startsWith("/settings"));
+
+  const moduleHints: Record<string, string> = {
+    watching: "Track watch history and viewing trends.",
+    observations: "Explore species activity, observation streaks, and habitat patterns.",
+    finance: "Ingest account and category spend data.",
+    revolut: "Sync Revolut cards, transfers, and balances.",
+    energy: "Track meter usage and electricity costs.",
+    fuel: "Log fill-ups and economy performance.",
+    mobility: "Import ride receipts and trip costs.",
+    food: "Capture food delivery order totals.",
+    groceries: "Track grocery baskets and store spend.",
+    inbox: "Extract receipt data from incoming files.",
+  };
+
+  function moduleHint(moduleId: string, enabled: boolean): string {
+    const base = moduleHints[moduleId] ?? "Module data and widgets.";
+    return enabled ? base : `${base} Enable this module in settings.`;
+  }
+
+  function moduleHref(moduleId: string): string {
+    return moduleId === "observations" ? "/nature-observations" : `/m/${moduleId}`;
+  }
 </script>
 
 <div class="shell">
@@ -54,13 +76,15 @@
       </a>
 
       <p class="group">Modules</p>
+      <p class="group-help">Each module has a dedicated importer and widgets.</p>
       {#each data.modules as m (m.id)}
         <a
-          href="/m/{m.id}"
+          href={moduleHref(m.id)}
           class="item"
-          class:active={path === `/m/${m.id}`}
+          class:active={path === moduleHref(m.id)}
           class:dim={!m.enabled}
           style="--dot: {m.accent}"
+          title={moduleHint(m.id, m.enabled)}
           onclick={() => (navOpen = false)}
         >
           <span class="dot" aria-hidden="true"></span>
@@ -145,6 +169,12 @@
     font-weight: 600;
     letter-spacing: 0.09em;
     text-transform: uppercase;
+    color: var(--text-faint);
+  }
+  .group-help {
+    margin: 0 var(--s3) var(--s2);
+    font-size: 12px;
+    line-height: 1.4;
     color: var(--text-faint);
   }
 

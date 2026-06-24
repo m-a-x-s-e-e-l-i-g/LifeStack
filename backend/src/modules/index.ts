@@ -8,9 +8,21 @@ import food from "./food";
 import inbox from "./inbox";
 import groceries from "./groceries";
 import revolut from "./revolut";
+import observations from "./observations";
 
 /**
  * Registered modules. Add a new module here to make it available.
  * Order controls the navigation order in the UI.
  */
-export const modules: LifeStackModule[] = [watching, finance, revolut, energy, fuel, mobility, food, groceries, inbox];
+export const modules: LifeStackModule[] = [
+  watching,
+  observations,
+  finance,
+  revolut,
+  energy,
+  fuel,
+  mobility,
+  food,
+  groceries,
+  inbox,
+];

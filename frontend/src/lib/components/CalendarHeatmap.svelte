@@ -18,32 +18,35 @@
   const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
   const dowLabels = ["Mon", "", "Wed", "", "Fri", "", ""];
 
-  function parse(s: string) {
-    const [y, m, d] = s.split("-").map(Number);
-    return new Date(y, m - 1, d);
-  }
-  function iso(dt: Date) {
-    return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(dt.getDate()).padStart(2, "0")}`;
+  function iso(ms: number) {
+    const dt = new Date(ms);
+    return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, "0")}-${String(dt.getUTCDate()).padStart(2, "0")}`;
   }
 
   const model = $derived(
     (() => {
       const days = (data.days ?? []).filter((d) => d.date);
       if (!days.length) return { cells: [], labels: [], weeks: 0, max: 1 };
-      const map = new Map(days.map((d) => [d.date, d.value]));
-      const dates = days.map((d) => parse(d.date)).sort((a, b) => +a - +b);
-      const start = dates[0];
-      const end = dates[dates.length - 1];
-      const aligned = new Date(start);
-      aligned.setDate(start.getDate() - ((start.getDay() + 6) % 7));
-      const totalDays = Math.round((+end - +aligned) / oneDay) + 1;
+      const map = new Map(
+        days.map((d) => [String(d.date).slice(0, 10), Number(d.value ?? 0)]),
+      );
+
+      // Always render a complete trailing 365-day window.
+      const end = new Date();
+      end.setUTCHours(0, 0, 0, 0);
+      const endMs = end.getTime();
+      const startMs = endMs - 364 * oneDay;
+
+      const startDow = new Date(startMs).getUTCDay();
+      const alignedMs = startMs - ((startDow + 6) % 7) * oneDay;
+      const totalDays = Math.round((endMs - alignedMs) / oneDay) + 1;
       const weeks = Math.ceil(totalDays / 7);
-      const max = Math.max(1, ...days.map((d) => d.value));
+      const max = Math.max(1, ...[...map.values()].map((v) => Number(v) || 0));
 
       const cells = [];
       for (let i = 0; i < totalDays; i++) {
-        const dt = new Date(+aligned + i * oneDay);
-        const key = iso(dt);
+        const ms = alignedMs + i * oneDay;
+        const key = iso(ms);
         const v = map.get(key) ?? 0;
         cells.push({
           x: padL + Math.floor(i / 7) * step,
@@ -58,10 +61,10 @@
       const labels: { x: number; text: string }[] = [];
       let prev = -1;
       for (let wk = 0; wk < weeks; wk++) {
-        const dt = new Date(+aligned + wk * 7 * oneDay);
-        if (dt.getMonth() !== prev) {
-          labels.push({ x: padL + wk * step, text: months[dt.getMonth()] });
-          prev = dt.getMonth();
+        const dt = new Date(alignedMs + wk * 7 * oneDay);
+        if (dt.getUTCMonth() !== prev) {
+          labels.push({ x: padL + wk * step, text: months[dt.getUTCMonth()] });
+          prev = dt.getUTCMonth();
         }
       }
       return { cells, labels, weeks, max };

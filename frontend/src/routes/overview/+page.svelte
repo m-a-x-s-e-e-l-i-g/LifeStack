@@ -44,6 +44,10 @@
   );
 
   const enabledCount = $derived(data.overview.modules.filter((m) => m.enabled).length);
+
+  function moduleHref(moduleId: string): string {
+    return moduleId === "observations" ? "/nature-observations" : `/m/${moduleId}`;
+  }
 </script>
 
 <svelte:head><title>LifeStack — Overview</title></svelte:head>
@@ -73,12 +77,12 @@
     {#each groups as g (g.id)}
       <section class="strip" style="--accent: {g.accent}">
         <div class="strip-head">
-          <a href="/m/{g.id}" class="title">
+          <a href={moduleHref(g.id)} class="title">
             <span class="dot"></span>
             <span class="icon">{g.icon}</span>
             <h2>{g.name}</h2>
           </a>
-          <a href="/m/{g.id}" class="view">
+          <a href={moduleHref(g.id)} class="view">
             {#if g.lastSync?.at}<span class="synced" class:failed={syncFailed(g.lastSync)}>{syncLabel(g.lastSync)}</span>{/if}
             View module →
           </a>

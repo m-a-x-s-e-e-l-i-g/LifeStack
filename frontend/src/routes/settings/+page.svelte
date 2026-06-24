@@ -40,6 +40,10 @@
       aiBusy = false;
     }
   }
+
+  function moduleHref(moduleId: string): string {
+    return moduleId === "observations" ? "/nature-observations" : `/m/${moduleId}`;
+  }
 </script>
 
 <svelte:head><title>LifeStack — Settings</title></svelte:head>
@@ -115,7 +119,7 @@
           <div>
             <div class="mname">
               <h2>{m.name}</h2>
-              <a class="open" href="/m/{m.id}">Open →</a>
+              <a class="open" href={moduleHref(m.id)}>Open →</a>
             </div>
             <p class="mdesc">{m.description}</p>
           </div>

@@ -162,6 +162,53 @@ export interface OverviewData {
   featured: OverviewFeatured[];
 }
 
+export interface ObservationInsightsSummary {
+  totalObservations: number;
+  totalSpecies: number;
+  countriesObserved: number;
+  mappedObservations: number;
+  activeDays: number;
+  firstObserved: string | null;
+  lastObserved: string | null;
+}
+
+export interface ObservationMonthlyPoint {
+  month: string;
+  label: string;
+  observations: number;
+  species: number;
+}
+
+export interface ObservationCountryStat {
+  country: string;
+  observations: number;
+  species: number;
+}
+
+export interface ObservationMapPoint {
+  lat: number;
+  lon: number;
+  species: string;
+  country: string;
+  date: string;
+}
+
+export interface ObservationInsights {
+  module: ModuleMeta;
+  enabled: boolean;
+  summary: ObservationInsightsSummary | null;
+  monthly: ObservationMonthlyPoint[];
+  countries: ObservationCountryStat[];
+  map: {
+    totalMapped: number;
+    returned: number;
+    points: ObservationMapPoint[];
+  };
+  topSpecies: { species: string; observations: number }[];
+  streaks: { current: number; latest: number; longest: number };
+  busiestDay: { date: string; observations: number } | null;
+}
+
 export interface AiStatus {
   configured: boolean;
   model: string | null;
