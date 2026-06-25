@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { client, command, getMeta, insert, query, setMeta } from "../db";
 import { env } from "../env";
 import { logger } from "../logger";
+import { modules } from "../modules";
 
 /**
  * Chat-first assistant. Provider agnostic: talks to any OpenAI-compatible
@@ -93,9 +94,31 @@ export async function schemaSummary(): Promise<string> {
   if (byTable.size === 0) {
     return "There are no data tables with content yet. The user must connect a source (for example Trakt) and sync, or import data, before there is anything to query.";
   }
-  return [...byTable.entries()]
+  const tableNames = [...byTable.keys()].sort();
+  const moduleTableHints = (() => {
+    const remaining = new Set(tableNames);
+    const lines = modules.map((m) => {
+      const prefixes = new Set<string>([`${m.id}_`]);
+      if (m.id.endsWith("s")) prefixes.add(`${m.id.slice(0, -1)}_`);
+      if (m.id.endsWith("ies")) prefixes.add(`${m.id.slice(0, -3)}y_`);
+      if (m.id.endsWith("ing")) prefixes.add(`${m.id.slice(0, -3)}_`);
+
+      const matched = tableNames.filter((t) => [...prefixes].some((p) => t.startsWith(p)));
+      for (const table of matched) remaining.delete(table);
+
+      return `- ${m.name} (${m.id}): ${matched.length ? matched.join(", ") : "none yet"}`;
+    });
+
+    const leftovers = [...remaining].sort();
+    if (leftovers.length > 0) lines.push(`- Other readable tables: ${leftovers.join(", ")}`);
+    return lines.join("\n");
+  })();
+
+  const schema = [...byTable.entries()]
     .map(([t, c]) => `${t}(${c.join(", ")})`)
     .join("\n");
+
+  return `Module read access tables:\n${moduleTableHints}\n\nData tables (with columns):\n${schema}`;
 }
 
 const FORBIDDEN =
@@ -738,6 +761,7 @@ ${schema}
 
 Rules:
 - To get any number, call run_sql. Never invent values; if a query returns no rows, say the data is not there yet.
+- You have read access to every table listed above under "Module read access tables", including Nature observations tables.
 - For screenshot imports, extract structured entries and call write_records with the correct target table and rows.
 - Food delivery screenshots (Uber Eats, takeaway.com, thuisbezorgd) should be written to food_order.
 - Mobility screenshots should normalize provider names (Uber, Bolt, Lime, Tier, Bird, Lyft) and set type to taxi, scooter, or bike. If the screenshot indicates bike/e-bike/cycle, keep it as bike even for Lime/Tier/Bird.
