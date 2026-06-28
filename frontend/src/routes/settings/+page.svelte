@@ -7,6 +7,8 @@
   let { data }: { data: PageData } = $props();
 
   let busyModule = $state<string | null>(null);
+  let addingMailboxModule = $state<string | null>(null);
+  let mailboxAddError = $state<string | null>(null);
 
   let ai = $state({ baseUrl: "", model: "", apiKey: "" });
   let aiBusy = $state(false);
@@ -19,6 +21,19 @@
       await invalidateAll();
     } finally {
       busyModule = null;
+    }
+  }
+
+  async function addMailboxSlot(moduleId: string) {
+    addingMailboxModule = moduleId;
+    mailboxAddError = null;
+    try {
+      await action(`/modules/${moduleId}/connectors/mailbox/add`);
+      await invalidateAll();
+    } catch (e) {
+      mailboxAddError = e instanceof Error ? e.message : "Failed to add mailbox slot";
+    } finally {
+      addingMailboxModule = null;
     }
   }
 
@@ -143,6 +158,19 @@
           {/key}
         {/each}
       </div>
+
+      {#if m.id === "inbox"}
+        <div class="conn-tools">
+          <button
+            class="btn btn--ghost"
+            onclick={() => addMailboxSlot(m.id)}
+            disabled={addingMailboxModule === m.id}
+          >
+            {addingMailboxModule === m.id ? "Adding mailbox…" : "+ Add mailbox"}
+          </button>
+          {#if mailboxAddError}<span class="conn-error">{mailboxAddError}</span>{/if}
+        </div>
+      {/if}
     </section>
   {/each}
 </div>
@@ -328,6 +356,17 @@
     display: flex;
     flex-direction: column;
     gap: var(--s3);
+  }
+  .conn-tools {
+    margin-top: var(--s3);
+    display: flex;
+    align-items: center;
+    gap: var(--s3);
+    flex-wrap: wrap;
+  }
+  .conn-error {
+    font-size: 12px;
+    color: oklch(0.7 0.13 25);
   }
 
   .switch {

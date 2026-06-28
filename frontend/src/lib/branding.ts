@@ -5,8 +5,6 @@ const PROVIDER_LOGOS: Record<string, string> = {
   trakt: "https://walter.trakt.tv/assets/logos/header/trakt-header-white.png",
   "trakt tv": "https://walter.trakt.tv/assets/logos/header/trakt-header-white.png",
   revolut: "https://upload.wikimedia.org/wikipedia/commons/thumb/8/8f/Revolut_logo.svg/1024px-Revolut_logo.svg.png",
-  gmail: "https://upload.wikimedia.org/wikipedia/commons/thumb/7/7e/Gmail_icon_%282020%29.svg/1024px-Gmail_icon_%282020%29.svg.png",
-  outlook: "https://upload.wikimedia.org/wikipedia/commons/thumb/d/df/Microsoft_Office_Outlook_%282018%E2%80%93present%29.svg/1024px-Microsoft_Office_Outlook_%282018%E2%80%93present%29.svg.png",
   thuisbezorgd: "https://upload.wikimedia.org/wikipedia/commons/thumb/a/a9/Thuisbezorgd.svg/1024px-Thuisbezorgd.svg.png",
   "takeaway com": "https://upload.wikimedia.org/wikipedia/commons/thumb/a/a9/Thuisbezorgd.svg/1024px-Thuisbezorgd.svg.png",
   "uber eats": "https://upload.wikimedia.org/wikipedia/commons/thumb/1/1c/Uber_Eats.svg/1024px-Uber_Eats.svg.png",

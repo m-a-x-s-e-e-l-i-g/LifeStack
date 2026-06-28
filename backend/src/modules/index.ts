@@ -9,6 +9,8 @@ import inbox from "./inbox";
 import groceries from "./groceries";
 import revolut from "./revolut";
 import observations from "./observations";
+import flights from "./flights";
+import reservations from "./reservations";
 
 /**
  * Registered modules. Add a new module here to make it available.
@@ -22,6 +24,8 @@ export const modules: LifeStackModule[] = [
   energy,
   fuel,
   mobility,
+  flights,
+  reservations,
   food,
   groceries,
   inbox,

@@ -209,6 +209,40 @@ export interface ObservationInsights {
   busiestDay: { date: string; observations: number } | null;
 }
 
+export type InboxReceiptStatus = "pending" | "approved" | "declined";
+export type InboxReceiptKind =
+  | "mobility"
+  | "mobility_pass"
+  | "food"
+  | "groceries"
+  | "parking"
+  | "flights"
+  | "reservations";
+
+export interface InboxReceiptReviewItem {
+  id: string;
+  status: InboxReceiptStatus;
+  kind: InboxReceiptKind;
+  provider: string;
+  day: string;
+  createdAt: string;
+  amount: number;
+  currency: string;
+  amountEur: number;
+  amountLabel: string;
+  summary: string;
+  details: string;
+  messageId: string;
+  emailExcerpt: string;
+  reviewNote: string;
+}
+
+export interface InboxReceiptReviewResponse {
+  status: InboxReceiptStatus;
+  totals: { pending: number; approved: number; declined: number };
+  receipts: InboxReceiptReviewItem[];
+}
+
 export interface AiStatus {
   configured: boolean;
   model: string | null;
@@ -219,7 +253,7 @@ export interface AiStatus {
 export interface ChatMessage {
   role: "user" | "assistant" | "system" | "tool";
   content: string;
-  attachments?: { name?: string | null; mime: string; dataUrl: string }[];
+  attachments?: { name?: string | null; mime: string; dataUrl: string; text?: string | null }[];
 }
 
 export interface ChatStep {

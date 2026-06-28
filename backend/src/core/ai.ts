@@ -9,7 +9,7 @@ import { modules } from "../modules";
  * /chat/completions endpoint (OpenAI, Ollama /v1, LM Studio, vLLM, ...).
  *
  * It can read data via SQL and, when explicitly requested by the user, ingest
- * structured records into local tables (for example from screenshots).
+ * structured records into local tables (for example from receipts or CSV files).
  */
 
 const log = logger.child("ai");
@@ -21,6 +21,7 @@ const CORE_TABLES = new Set([
   "schema_migrations",
   "sync_log",
   "ai_ingest_dedupe",
+  "ai_assistant_record_log",
 ]);
 
 export interface AiConfig {
@@ -164,6 +165,7 @@ export interface ChatAttachment {
   name?: string | null;
   mime: string;
   dataUrl: string;
+  text?: string | null;
 }
 
 export interface ChatMessage {
@@ -235,6 +237,7 @@ async function callModel(
 
 type WriteTarget =
   | "mobility_ride"
+  | "mobility_lime_pass"
   | "finance_tx"
   | "fuel_fillup"
   | "energy_reading"
@@ -315,6 +318,51 @@ function normalizeRideType(rawType: unknown, provider: string): string {
   return t || "ride";
 }
 
+function asObjectRows(rowsInput: unknown[]): { rows: Record<string, unknown>[]; rejected: number } {
+  const rows: Record<string, unknown>[] = [];
+  let rejected = 0;
+  for (const raw of rowsInput) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      rejected++;
+      continue;
+    }
+    rows.push(raw as Record<string, unknown>);
+  }
+  return { rows, rejected };
+}
+
+function isLikelyLimePassRow(raw: Record<string, unknown>): boolean {
+  const provider = normalizeProviderName(raw.provider ?? raw.app ?? raw.service).toLowerCase();
+  const text = Object.values(raw)
+    .map((v) => String(v ?? ""))
+    .join(" ")
+    .toLowerCase();
+  const mentionsLime = provider.includes("lime") || text.includes("lime");
+  const hasPassSignal = /\blime\s*pass\b|\bpass(?:es)?\b|\bsubscription\b|\bbundle\b|\bpackage\b|\bunlimited\b|\bunlock\b/.test(
+    text,
+  );
+
+  if (mentionsLime && hasPassSignal) return true;
+
+  const distance = Number(raw.distance_km ?? raw.distance ?? raw.km);
+  const duration = Number(raw.duration_min ?? raw.duration ?? raw.minutes);
+  const hasRideMetrics = (Number.isFinite(distance) && distance > 0) || (Number.isFinite(duration) && duration > 0);
+  const hasStartedAt = String(raw.started_at ?? raw.startedAt ?? raw.timestamp ?? raw.time ?? "").trim().length > 0;
+  const rideType = String(raw.type ?? raw.vehicle ?? "").trim().toLowerCase();
+  const vagueLimeRide =
+    provider.includes("lime") &&
+    !hasRideMetrics &&
+    !hasStartedAt &&
+    (!rideType || rideType.includes("bike") || rideType.includes("scooter") || rideType.includes("ride"));
+
+  return vagueLimeRide;
+}
+
+function resolveWriteTarget(target: WriteTarget, rows: Record<string, unknown>[]): WriteTarget {
+  if (target !== "mobility_ride" || rows.length === 0) return target;
+  return rows.every((row) => isLikelyLimePassRow(row)) ? "mobility_lime_pass" : target;
+}
+
 function stableHash(target: WriteTarget, row: Record<string, unknown>): string {
   const ordered = Object.keys(row)
     .sort()
@@ -325,6 +373,19 @@ function stableHash(target: WriteTarget, row: Record<string, unknown>): string {
 }
 
 function normalizeRow(target: WriteTarget, raw: Record<string, unknown>): Record<string, unknown> {
+  if (target === "mobility_lime_pass") {
+    const originalCost = num(raw.cost ?? raw.amount ?? raw.price ?? raw.total);
+    const costCurrency = normalizeCurrencyCode(raw.cost_currency ?? raw.currency ?? raw.currency_code);
+    const description = String(raw.description ?? raw.plan ?? raw.product ?? raw.title ?? "Lime pass").trim();
+    return {
+      day: day(raw.day ?? raw.date),
+      cost: originalCost,
+      cost_currency: costCurrency,
+      cost_eur: toEur(originalCost, costCurrency),
+      description: description || "Lime pass",
+      notes: String(raw.notes ?? raw.note ?? ""),
+    };
+  }
   if (target === "mobility_ride") {
     const provider = normalizeProviderName(raw.provider ?? raw.app ?? raw.service);
     const startedAt = raw.started_at ?? raw.startedAt ?? raw.timestamp ?? raw.time;
@@ -390,22 +451,17 @@ function normalizeRow(target: WriteTarget, raw: Record<string, unknown>): Record
 async function writeRecords(
   target: WriteTarget,
   rowsInput: unknown[],
+  changeId?: string,
 ): Promise<Record<string, unknown>> {
   if (!Array.isArray(rowsInput)) throw new Error("rows must be an array");
-  const normalized: Record<string, unknown>[] = [];
-  let rejected = 0;
-
-  for (const raw of rowsInput) {
-    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-      rejected++;
-      continue;
-    }
-    normalized.push(normalizeRow(target, raw as Record<string, unknown>));
-  }
+  const { rows: objectRows, rejected } = asObjectRows(rowsInput);
+  const effectiveTarget = resolveWriteTarget(target, objectRows);
+  const reroutedTarget = effectiveTarget !== target;
+  const normalized = objectRows.map((raw) => normalizeRow(effectiveTarget, raw));
 
   if (normalized.length === 0) {
     return {
-      target,
+      target: effectiveTarget,
       inserted: 0,
       skippedDuplicates: 0,
       rejected,
@@ -413,16 +469,17 @@ async function writeRecords(
     };
   }
 
-  const hashes = normalized.map((r) => stableHash(target, r));
+  const hashes = normalized.map((r) => stableHash(effectiveTarget, r));
   const seenRows = await query<{ hash: string }>(
     `SELECT hash FROM ai_ingest_dedupe FINAL
      WHERE target = {target:String} AND hash IN {hashes:Array(String)}`,
-    { target, hashes },
+    { target: effectiveTarget, hashes },
   );
   const seen = new Set(seenRows.map((r) => r.hash));
 
   const toInsert: Record<string, unknown>[] = [];
   const dedupeRows: Record<string, unknown>[] = [];
+  const auditRows: Record<string, unknown>[] = [];
   let skippedDuplicates = 0;
 
   for (let i = 0; i < normalized.length; i++) {
@@ -435,7 +492,15 @@ async function writeRecords(
     seen.add(hash);
     toInsert.push(row);
     dedupeRows.push({
-      target,
+      target: effectiveTarget,
+      hash,
+      payload: JSON.stringify(row),
+      created_at: new Date().toISOString(),
+    });
+    auditRows.push({
+      event_id: randomUUID(),
+      change_id: String(changeId ?? ""),
+      target: effectiveTarget,
       hash,
       payload: JSON.stringify(row),
       created_at: new Date().toISOString(),
@@ -443,16 +508,19 @@ async function writeRecords(
   }
 
   if (toInsert.length > 0) {
-    await insert(target, toInsert);
+    await insert(effectiveTarget, toInsert);
     await insert("ai_ingest_dedupe", dedupeRows);
+    await insert("ai_assistant_record_log", auditRows);
   }
 
   return {
-    target,
+    target: effectiveTarget,
     inserted: toInsert.length,
     skippedDuplicates,
     rejected,
-    message: `Saved ${toInsert.length} row(s) to ${target}; skipped ${skippedDuplicates} duplicate(s).`,
+    message: reroutedTarget
+      ? `Saved ${toInsert.length} row(s) to ${effectiveTarget} (auto-routed from ${target}); skipped ${skippedDuplicates} duplicate(s).`
+      : `Saved ${toInsert.length} row(s) to ${effectiveTarget}; skipped ${skippedDuplicates} duplicate(s).`,
   };
 }
 
@@ -467,6 +535,15 @@ const DELETE_COLUMNS: Record<WriteTarget, string[]> = {
     "cost",
     "cost_currency",
     "cost_eur",
+  ],
+  mobility_lime_pass: [
+    "day",
+    "created_at",
+    "cost",
+    "cost_currency",
+    "cost_eur",
+    "description",
+    "notes",
   ],
   finance_tx: ["day", "description", "category", "amount"],
   fuel_fillup: ["day", "liters", "price_per_liter", "cost", "odometer"],
@@ -620,7 +697,7 @@ export async function applyPendingChange(
   change: PendingChange,
 ): Promise<Record<string, unknown>> {
   if (change.kind === "write_records") {
-    return writeRecords(change.target, Array.isArray(change.rows) ? change.rows : []);
+    return writeRecords(change.target, Array.isArray(change.rows) ? change.rows : [], change.id);
   }
   if (change.kind === "update_records") {
     return updateRecords(change.target, change.where, change.updates);
@@ -653,7 +730,7 @@ const TOOLS = [
     function: {
       name: "write_records",
       description:
-        "Insert structured records into a local LifeStack table. Use this only when the user explicitly asks to save/import data (for example from screenshots).",
+        "Insert structured records into a local LifeStack table. Use this only when the user explicitly asks to save/import data (for example from receipts, screenshots, or CSV files).",
       parameters: {
         type: "object",
         properties: {
@@ -661,6 +738,7 @@ const TOOLS = [
             type: "string",
             enum: [
               "mobility_ride",
+              "mobility_lime_pass",
               "finance_tx",
               "fuel_fillup",
               "energy_reading",
@@ -691,6 +769,7 @@ const TOOLS = [
             type: "string",
             enum: [
               "mobility_ride",
+              "mobility_lime_pass",
               "finance_tx",
               "fuel_fillup",
               "energy_reading",
@@ -722,6 +801,7 @@ const TOOLS = [
             type: "string",
             enum: [
               "mobility_ride",
+              "mobility_lime_pass",
               "finance_tx",
               "fuel_fillup",
               "energy_reading",
@@ -749,6 +829,7 @@ const TOOLS = [
 ];
 
 const MAX_ATTACHMENTS_PER_BATCH = 5;
+const MAX_ATTACHMENT_TEXT_CHARS = 24000;
 
 function systemPrompt(schema: string): string {
   const today = new Date().toISOString().slice(0, 10);
@@ -762,10 +843,12 @@ ${schema}
 Rules:
 - To get any number, call run_sql. Never invent values; if a query returns no rows, say the data is not there yet.
 - You have read access to every table listed above under "Module read access tables", including Nature observations tables.
-- For screenshot imports, extract structured entries and call write_records with the correct target table and rows.
-- Food delivery screenshots (Uber Eats, takeaway.com, thuisbezorgd) should be written to food_order.
-- Mobility screenshots should normalize provider names (Uber, Bolt, Lime, Tier, Bird, Lyft) and set type to taxi, scooter, or bike. If the screenshot indicates bike/e-bike/cycle, keep it as bike even for Lime/Tier/Bird.
-- If a mobility screenshot includes an explicit ride time, store it as started_at.
+- For file imports (screenshots, receipts, CSV, or text), extract structured entries and call write_records with the correct target table and rows.
+- Food delivery receipts/screenshots (Uber Eats, takeaway.com, thuisbezorgd) should be written to food_order.
+- Mobility receipts/screenshots should normalize provider names (Uber, Bolt, Lime, Tier, Bird, Lyft) and set type to taxi, scooter, or bike. If the source indicates bike/e-bike/cycle, keep it as bike even for Lime/Tier/Bird.
+- Lime pass purchases (for example day passes or subscriptions) are not rides; write them to mobility_lime_pass with day, cost, cost_currency, cost_eur, description, and optional notes.
+- Never write Lime passes or subscriptions into mobility_ride, even if a screenshot mentions bike or scooter.
+- If a mobility source includes an explicit ride time, store it as started_at.
 - Mobility cost must preserve the original amount in cost and original ISO currency in cost_currency (for example CZK, EUR, USD). Never assume EUR when a non-EUR currency is shown.
 - Only modify data when the user explicitly asks. Use write_records to add new rows, update_records to change specific field values on existing entries (e.g., if user says "this should be Uber instead"), and delete_records to remove rows entirely. For updates, use the most specific identifying fields in the WHERE clause (e.g., day + started_at for mobility_ride) to target exactly the record the user refers to.
 - ClickHouse dialect: use today(), now(), toStartOfMonth(x), toYYYYMM(x), formatDateTime(x, '%b'), countIf(cond), sumIf(x, cond), uniqExact(x), arrayJoin(arr). Date math uses INTERVAL, e.g. today() - INTERVAL 12 MONTH.
@@ -831,18 +914,112 @@ function withAttachments(messages: ChatMessage[], index: number, attachments: Ch
   return messages.map((m, i) => (i === index ? { ...m, attachments } : m));
 }
 
-function toUserContent(m: ChatMessage): unknown {
-  const images = (m.attachments ?? []).filter(
-    (a) => typeof a.dataUrl === "string" && /^data:image\//.test(a.dataUrl),
+function attachmentName(attachment: ChatAttachment, index: number): string {
+  const raw = String(attachment.name ?? "").trim();
+  return raw || `attachment-${index + 1}`;
+}
+
+function isTextLikeMime(mime: string): boolean {
+  const lower = String(mime ?? "").toLowerCase();
+  return (
+    lower.startsWith("text/") ||
+    lower === "application/json" ||
+    lower === "application/csv" ||
+    lower === "text/csv" ||
+    lower === "text/tab-separated-values" ||
+    lower === "application/xml" ||
+    lower === "text/xml"
   );
-  if (images.length === 0) return m.content ?? "";
-  const parts: Array<Record<string, unknown>> = [];
-  if (m.content?.trim()) parts.push({ type: "text", text: m.content.trim() });
-  for (const img of images) {
-    parts.push({ type: "image_url", image_url: { url: img.dataUrl } });
+}
+
+function isImageAttachment(attachment: ChatAttachment): boolean {
+  const mime = String(attachment.mime ?? "").toLowerCase();
+  return mime.startsWith("image/") || /^data:image\//i.test(String(attachment.dataUrl ?? ""));
+}
+
+function decodeTextDataUrl(dataUrl: string): string | null {
+  if (typeof dataUrl !== "string" || !dataUrl.startsWith("data:")) return null;
+  const comma = dataUrl.indexOf(",");
+  if (comma < 0) return null;
+
+  const header = dataUrl.slice(5, comma);
+  const payload = dataUrl.slice(comma + 1);
+  const isBase64 = /;base64/i.test(header);
+
+  try {
+    if (isBase64) return Buffer.from(payload, "base64").toString("utf8");
+    return decodeURIComponent(payload.replace(/\+/g, "%20"));
+  } catch {
+    return null;
   }
-  if (parts.length === 0) parts.push({ type: "text", text: "Analyze this screenshot." });
-  return parts;
+}
+
+function clipAttachmentText(raw: string): string {
+  const text = raw.trim();
+  if (!text) return "";
+  if (text.length <= MAX_ATTACHMENT_TEXT_CHARS) return text;
+  return `${text.slice(0, MAX_ATTACHMENT_TEXT_CHARS)}\n...[truncated]`;
+}
+
+function attachmentText(attachment: ChatAttachment): string {
+  if (typeof attachment.text === "string" && attachment.text.trim()) {
+    return clipAttachmentText(attachment.text);
+  }
+  if (!isTextLikeMime(attachment.mime)) return "";
+  const decoded = decodeTextDataUrl(attachment.dataUrl);
+  return decoded ? clipAttachmentText(decoded) : "";
+}
+
+function toUserContent(m: ChatMessage): unknown {
+  const attachments = m.attachments ?? [];
+  if (attachments.length === 0) return m.content ?? "";
+
+  const includesImage = attachments.some((attachment) => isImageAttachment(attachment));
+  const parts: Array<Record<string, unknown>> = [];
+  const textBlocks: string[] = [];
+
+  if (m.content?.trim()) {
+    if (includesImage) parts.push({ type: "text", text: m.content.trim() });
+    else textBlocks.push(m.content.trim());
+  }
+
+  for (let index = 0; index < attachments.length; index++) {
+    const attachment = attachments[index];
+    const mime = String(attachment.mime ?? "application/octet-stream").trim() || "application/octet-stream";
+    const name = attachmentName(attachment, index);
+
+    if (includesImage && isImageAttachment(attachment)) {
+      parts.push({ type: "image_url", image_url: { url: attachment.dataUrl } });
+      continue;
+    }
+
+    const text = attachmentText(attachment);
+    const block = text
+      ? `Attachment \"${name}\" (${mime}):\n${text}`
+      : `Attachment \"${name}\" (${mime}) was uploaded as binary data. Ask the user for a text, CSV, or image version if extraction is required.`;
+
+    if (text) {
+      if (includesImage) {
+        parts.push({ type: "text", text: block });
+      } else {
+        textBlocks.push(block);
+      }
+    } else {
+      if (includesImage) {
+        parts.push({ type: "text", text: block });
+      } else {
+        textBlocks.push(block);
+      }
+    }
+  }
+
+  if (includesImage) {
+    if (parts.length === 0) parts.push({ type: "text", text: "Analyze the attached files." });
+    return parts;
+  }
+
+  if (textBlocks.length === 0) return m.content ?? "";
+  return textBlocks.join("\n\n");
 }
 
 export async function chat(
@@ -881,7 +1058,10 @@ export async function chat(
     const steps: ChatStep[] = [];
     const pendingActions: PendingChange[] = [];
     const hasImages = messages.some(
-      (m) => m.role === "user" && Array.isArray(m.attachments) && m.attachments.length > 0,
+      (m) =>
+        m.role === "user" &&
+        Array.isArray(m.attachments) &&
+        m.attachments.some((attachment) => isImageAttachment(attachment)),
     );
     const modelCandidates = (
       hasImages && /api\.openai\.com/i.test(cfg.baseUrl)
@@ -920,7 +1100,7 @@ export async function chat(
         ) {
           return {
             reply:
-              "Your current model endpoint rejected the screenshot. Switch to a vision-capable OpenAI-compatible model in Settings, then upload again.",
+              "Your current model endpoint rejected one or more image attachments. Switch to a vision-capable OpenAI-compatible model in Settings, then upload again.",
             steps,
           };
         }
@@ -950,28 +1130,37 @@ export async function chat(
             stepRows = out.rows;
             content = JSON.stringify({ rowCount: out.rows.length, rows: out.rows.slice(0, 50) });
           } else if (call.function.name === "write_records") {
-            const target = String(args.target ?? "") as WriteTarget;
+            const requestedTarget = String(args.target ?? "") as WriteTarget;
             if (
               ![
                 "mobility_ride",
+                "mobility_lime_pass",
                 "finance_tx",
                 "fuel_fillup",
                 "energy_reading",
                 "food_order",
-              ].includes(target)
+              ].includes(requestedTarget)
             ) {
               throw new Error("Unsupported write target");
             }
             const rows = Array.isArray(args.rows) ? args.rows : [];
+            const { rows: objectRows } = asObjectRows(rows);
+            const target = resolveWriteTarget(requestedTarget, objectRows);
             const change: PendingChange = {
               id: randomUUID(),
               kind: "write_records",
               target,
               rows,
-              summary: `Import ${rows.length} row${rows.length === 1 ? "" : "s"} into ${target}`,
+              summary:
+                target === requestedTarget
+                  ? `Import ${rows.length} row${rows.length === 1 ? "" : "s"} into ${target}`
+                  : `Import ${rows.length} row${rows.length === 1 ? "" : "s"} into ${target} (auto-routed from ${requestedTarget})`,
             };
             pendingActions.push(change);
-            stepSql = `pending write_records(${target})`;
+            stepSql =
+              target === requestedTarget
+                ? `pending write_records(${target})`
+                : `pending write_records(${target}) auto-routed from ${requestedTarget}`;
             stepRows = [{ pending: true, ...change }];
             content = JSON.stringify(change);
           } else if (call.function.name === "delete_records") {
@@ -979,6 +1168,7 @@ export async function chat(
             if (
               ![
                 "mobility_ride",
+                "mobility_lime_pass",
                 "finance_tx",
                 "fuel_fillup",
                 "energy_reading",
@@ -1003,6 +1193,7 @@ export async function chat(
             if (
               ![
                 "mobility_ride",
+                "mobility_lime_pass",
                 "finance_tx",
                 "fuel_fillup",
                 "energy_reading",
@@ -1140,7 +1331,7 @@ export async function chat(
   }
 
   const reply =
-    `Processed ${attachments.length} screenshots in ${batches.length} batch${batches.length === 1 ? "" : "es"}. ` +
+    `Processed ${attachments.length} attachment${attachments.length === 1 ? "" : "s"} in ${batches.length} batch${batches.length === 1 ? "" : "es"}. ` +
     `Saved ${totalInserted} row${totalInserted === 1 ? "" : "s"}, skipped ${totalSkipped} duplicate${totalSkipped === 1 ? "" : "s"}` +
     (totalRejected > 0 ? `, rejected ${totalRejected}` : "") +
     (failedBatches > 0 ? `, ${failedBatches} batch${failedBatches === 1 ? "" : "es"} failed` : "") +

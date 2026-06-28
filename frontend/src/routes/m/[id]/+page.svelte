@@ -47,6 +47,9 @@
       </div>
     </div>
     <div class="actions">
+      {#if m.id === "inbox" && data.stats.enabled}
+        <a class="btn btn--ghost" href="/m/inbox/receipts">Review receipts</a>
+      {/if}
       {#if !data.stats.enabled}
         <button class="btn btn--primary" onclick={enable} disabled={busy}>Enable module</button>
       {:else if status}

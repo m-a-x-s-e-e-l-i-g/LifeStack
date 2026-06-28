@@ -1,6 +1,10 @@
 import { applyModuleMigrations, command, insert, query } from "../db";
 import { logger } from "../logger";
 import { modules } from "../modules";
+import {
+  inboxMailboxConnector,
+  isInboxMailboxConnectorId,
+} from "../modules/inbox";
 import type {
   Connector,
   ConfigField,
@@ -13,6 +17,7 @@ import type {
 const byId = new Map<string, LifeStackModule>(modules.map((m) => [m.id, m]));
 
 const db = { query, insert, command };
+const activeSyncs = new Map<string, Promise<SyncResult>>();
 
 export function allModules(): LifeStackModule[] {
   return modules;
@@ -22,11 +27,62 @@ export function getModule(id: string): LifeStackModule | undefined {
   return byId.get(id);
 }
 
-export function getConnector(
+function inboxMailboxSortKey(id: string): number {
+  if (id === "mail-receipts") return 1;
+  const match = id.match(/^mail-receipts-(\d+)$/);
+  if (!match) return Number.MAX_SAFE_INTEGER;
+  const slot = Number(match[1]);
+  return Number.isFinite(slot) ? slot : Number.MAX_SAFE_INTEGER;
+}
+
+export async function moduleConnectors(m: LifeStackModule): Promise<Connector[]> {
+  if (m.id !== "inbox") return m.connectors;
+
+  const merged = new Map<string, Connector>(m.connectors.map((c) => [c.id, c]));
+  const rows = await query<{ connector_id: string; enabled: number; config: string }>(
+    `SELECT connector_id, enabled, config FROM connector_state FINAL
+     WHERE module_id = {m:String} AND connector_id LIKE 'mail-receipts-%'`,
+    { m: m.id },
+  );
+
+  for (const row of rows) {
+    const connectorId = String(row.connector_id ?? "").trim();
+    if (!connectorId || merged.has(connectorId)) continue;
+    const enabled = Number(row.enabled ?? 0) === 1;
+    const rawConfig = String(row.config ?? "").trim();
+    let configured = false;
+    if (rawConfig && rawConfig !== "{}") {
+      try {
+        const parsed = JSON.parse(rawConfig) as unknown;
+        configured =
+          !!parsed && typeof parsed === "object" && Object.keys(parsed as Record<string, unknown>).length > 0;
+      } catch {
+        configured = true;
+      }
+    }
+    if (!enabled && !configured) continue;
+
+    const dynamic = inboxMailboxConnector(connectorId);
+    if (dynamic) merged.set(connectorId, dynamic);
+  }
+
+  return Array.from(merged.values()).sort((a, b) => {
+    const rank = inboxMailboxSortKey(a.id) - inboxMailboxSortKey(b.id);
+    if (rank !== 0) return rank;
+    return a.id.localeCompare(b.id);
+  });
+}
+
+export async function getConnector(
   m: LifeStackModule,
   connectorId: string,
-): Connector | undefined {
-  return m.connectors.find((c) => c.id === connectorId);
+): Promise<Connector | undefined> {
+  const c = m.connectors.find((x) => x.id === connectorId);
+  if (c) return c;
+  if (m.id === "inbox" && isInboxMailboxConnectorId(connectorId)) {
+    return inboxMailboxConnector(connectorId) ?? undefined;
+  }
+  return undefined;
 }
 
 export async function isModuleEnabled(id: string): Promise<boolean> {
@@ -233,20 +289,32 @@ export async function runConnectorSync(
   m: LifeStackModule,
   c: Connector,
 ): Promise<SyncResult> {
-  if (!c.sync) return { message: "connector has no sync" };
-  const startedAt = new Date();
-  try {
-    const ctx = await buildConnectorContext(m, c);
-    const result = await c.sync(ctx);
-    await recordSync(m.id, c.id, "ok", startedAt, result.inserted ?? 0, result.message ?? null);
-    logger.child(`${m.id}:${c.id}`).info(`sync ok (${result.inserted ?? 0} inserted)`);
-    return result;
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    await recordSync(m.id, c.id, "error", startedAt, 0, message);
-    logger.child(`${m.id}:${c.id}`).error(`sync failed: ${message}`);
-    throw err;
-  }
+  const sync = c.sync;
+  if (!sync) return { message: "connector has no sync" };
+  const key = `${m.id}:${c.id}`;
+  const running = activeSyncs.get(key);
+  if (running) return running;
+
+  const task = (async (): Promise<SyncResult> => {
+    const startedAt = new Date();
+    try {
+      const ctx = await buildConnectorContext(m, c);
+      const result = await sync(ctx);
+      await recordSync(m.id, c.id, "ok", startedAt, result.inserted ?? 0, result.message ?? null);
+      logger.child(`${m.id}:${c.id}`).info(`sync ok (${result.inserted ?? 0} inserted)`);
+      return result;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      await recordSync(m.id, c.id, "error", startedAt, 0, message);
+      logger.child(`${m.id}:${c.id}`).error(`sync failed: ${message}`);
+      throw err;
+    } finally {
+      activeSyncs.delete(key);
+    }
+  })();
+
+  activeSyncs.set(key, task);
+  return task;
 }
 
 /** Run a connector's explicit authorize step (e.g. OAuth PIN exchange). */

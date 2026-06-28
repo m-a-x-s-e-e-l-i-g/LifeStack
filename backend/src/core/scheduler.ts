@@ -1,31 +1,59 @@
 import { logger } from "../logger";
 import {
   allModules,
+  getConnector,
+  getModule,
   isConnectorEnabled,
   isModuleEnabled,
+  moduleConnectors,
   runConnectorSync,
 } from "./registry";
 
-const timers: NodeJS.Timeout[] = [];
+const timers = new Map<string, NodeJS.Timeout>();
 const running = new Set<string>();
 
+function scheduleConnector(
+  moduleId: string,
+  connectorId: string,
+  syncIntervalMinutes: number,
+  initialDelayMs = 0,
+): void {
+  const key = `${moduleId}:${connectorId}`;
+  if (timers.has(key)) return;
+  const ms = syncIntervalMinutes * 60_000;
+  const timer = setInterval(() => {
+    void tick(moduleId, connectorId);
+  }, ms);
+  timer.unref?.();
+  timers.set(key, timer);
+  logger.info(`scheduled ${moduleId}:${connectorId} sync every ${syncIntervalMinutes}m`);
+  // Initial catch-up so data appears without waiting a full interval.
+  triggerSync(moduleId, connectorId, initialDelayMs);
+}
+
+export async function ensureConnectorScheduled(
+  moduleId: string,
+  connectorId: string,
+): Promise<void> {
+  const m = getModule(moduleId);
+  if (!m) return;
+  const c = await getConnector(m, connectorId);
+  if (!c?.sync || !c.syncIntervalMinutes) return;
+  scheduleConnector(moduleId, connectorId, c.syncIntervalMinutes);
+}
+
 export function startScheduler(): void {
-  let stagger = 3000;
-  for (const m of allModules()) {
-    for (const c of m.connectors) {
-      if (!c.sync || !c.syncIntervalMinutes) continue;
-      const ms = c.syncIntervalMinutes * 60_000;
-      const timer = setInterval(() => {
-        void tick(m.id, c.id);
-      }, ms);
-      timer.unref?.();
-      timers.push(timer);
-      logger.info(`scheduled ${m.id}:${c.id} sync every ${c.syncIntervalMinutes}m`);
-      // Initial catch-up so data appears without waiting a full interval.
-      triggerSync(m.id, c.id, stagger);
-      stagger += 4000;
+  void (async () => {
+    let stagger = 3000;
+    for (const m of allModules()) {
+      const connectors = await moduleConnectors(m);
+      for (const c of connectors) {
+        if (!c.sync || !c.syncIntervalMinutes) continue;
+        scheduleConnector(m.id, c.id, c.syncIntervalMinutes, stagger);
+        stagger += 4000;
+      }
     }
-  }
+  })();
 }
 
 /**
@@ -44,8 +72,8 @@ async function tick(moduleId: string, connectorId: string): Promise<void> {
   if (running.has(key)) return;
   if (!(await isModuleEnabled(moduleId))) return;
   if (!(await isConnectorEnabled(moduleId, connectorId))) return;
-  const m = allModules().find((x) => x.id === moduleId);
-  const c = m?.connectors.find((x) => x.id === connectorId);
+  const m = getModule(moduleId);
+  const c = m ? await getConnector(m, connectorId) : undefined;
   if (!m || !c) return;
   running.add(key);
   try {
@@ -58,6 +86,6 @@ async function tick(moduleId: string, connectorId: string): Promise<void> {
 }
 
 export function stopScheduler(): void {
-  timers.forEach(clearInterval);
-  timers.length = 0;
+  for (const timer of timers.values()) clearInterval(timer);
+  timers.clear();
 }

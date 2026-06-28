@@ -605,10 +605,26 @@ const fuelioLocal: Connector = {
   },
 };
 
+const inboxFuelScan: Connector = {
+  id: "inbox-fuel",
+  name: "Email receipts",
+  description: "Control whether inbox scanning imports parking receipts into this module.",
+  kind: "manual",
+  configSchema: [
+    {
+      key: "scanParking",
+      label: "Scan parking receipts",
+      type: "boolean",
+      default: true,
+      help: "Q-Park, EasyPark, Parkmobile, and similar parking payment receipts",
+    },
+  ],
+};
+
 const fuel: LifeStackModule = {
   id: "fuel",
   name: "Fuel",
-  description: "Fill-ups, fuel economy, and price per liter over time.",
+  description: "Fuel fill-ups, parking costs, and overall car running expenses.",
   icon: "⛽",
   accent: "oklch(0.73 0.16 55)",
   migrations: [
@@ -622,8 +638,20 @@ const fuel: LifeStackModule = {
     `ALTER TABLE fuel_fillup ADD COLUMN IF NOT EXISTS vehicle_guid String DEFAULT '' AFTER odometer`,
     `ALTER TABLE fuel_fillup ADD COLUMN IF NOT EXISTS vehicle_name String DEFAULT '' AFTER vehicle_guid`,
     `ALTER TABLE fuel_fillup ADD COLUMN IF NOT EXISTS entry_guid String DEFAULT '' AFTER vehicle_name`,
+    `CREATE TABLE IF NOT EXISTS fuel_parking_entry (
+       day Date,
+       started_at DateTime64(3) DEFAULT toDateTime64(day, 3),
+       provider String,
+       location String DEFAULT '',
+       amount Float64,
+       currency String DEFAULT 'EUR',
+       amount_eur Float64 DEFAULT amount,
+       source String DEFAULT 'inbox',
+       message_id String,
+       notes String DEFAULT ''
+     ) ENGINE = ReplacingMergeTree ORDER BY (day, provider, message_id)`,
   ],
-  connectors: [fuelioDropbox, fuelioGoogleDrive, fuelioLocal],
+  connectors: [fuelioDropbox, fuelioGoogleDrive, fuelioLocal, inboxFuelScan],
   widgets: [
     {
       id: "avg-consumption",
@@ -658,6 +686,35 @@ const fuel: LifeStackModule = {
           `SELECT round(sum(cost), 2) AS v FROM fuel_fillup FINAL`,
         );
         return { value: rows[0]?.v ?? 0, format: "currency" };
+      },
+    },
+    {
+      id: "parking-spent",
+      title: "Total parking spend",
+      type: "metric",
+      size: "sm",
+      featured: true,
+      async query(ctx) {
+        const rows = await ctx.db.query<{ v: number }>(
+          `SELECT round(sum(amount_eur), 2) AS v FROM fuel_parking_entry FINAL`,
+        );
+        return { value: rows[0]?.v ?? 0, format: "currency" };
+      },
+    },
+    {
+      id: "car-spent-total",
+      title: "Total car spend",
+      type: "metric",
+      size: "sm",
+      featured: true,
+      async query(ctx) {
+        const rows = await ctx.db.query<{ total: number }>(
+          `SELECT
+             round(sum(cost), 2)
+               + coalesce((SELECT round(sum(amount_eur), 2) FROM fuel_parking_entry FINAL), 0) AS total
+           FROM fuel_fillup FINAL`,
+        );
+        return { value: rows[0]?.total ?? 0, format: "currency" };
       },
     },
     {
@@ -745,6 +802,37 @@ const fuel: LifeStackModule = {
             { key: "price", label: "€/L", format: "currency", align: "right" },
             { key: "cost", label: "Cost", format: "currency", align: "right" },
             { key: "odometer", label: "Odometer", align: "right" },
+          ],
+          rows,
+        };
+      },
+    },
+    {
+      id: "recent-parking",
+      title: "Recent parking costs",
+      type: "table",
+      size: "lg",
+      async query(ctx) {
+        const rows = await ctx.db.query(
+          `SELECT
+             formatDateTime(started_at, '%Y-%m-%d %H:%i') AS when,
+             provider,
+             location,
+             round(amount, 2) AS amount,
+             upperUTF8(currency) AS currency,
+             round(amount_eur, 2) AS amount_eur
+           FROM fuel_parking_entry FINAL
+           ORDER BY started_at DESC, provider ASC
+           LIMIT 24`,
+        );
+        return {
+          columns: [
+            { key: "when", label: "When" },
+            { key: "provider", label: "Provider" },
+            { key: "location", label: "Location" },
+            { key: "amount", label: "Amount", align: "right" },
+            { key: "currency", label: "Cur." },
+            { key: "amount_eur", label: "EUR", format: "currency", align: "right" },
           ],
           rows,
         };

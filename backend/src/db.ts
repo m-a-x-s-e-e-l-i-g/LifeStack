@@ -123,6 +123,16 @@ export async function runCoreMigrations(): Promise<void> {
       payload String,
       created_at DateTime DEFAULT now()
     ) ENGINE = ReplacingMergeTree(created_at) ORDER BY (target, hash)`);
+
+  // Immutable audit trail for rows inserted through explicit AI approval.
+  await command(`CREATE TABLE IF NOT EXISTS ai_assistant_record_log (
+      event_id String,
+      change_id String,
+      target String,
+      hash String,
+      payload String,
+      created_at DateTime64(3) DEFAULT now64(3)
+    ) ENGINE = MergeTree ORDER BY (target, created_at, event_id)`);
 }
 
 /** Apply a module's DDL statements idempotently, tracked by content hash. */

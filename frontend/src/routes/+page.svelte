@@ -9,11 +9,14 @@
 
   let { data }: { data: PageData } = $props();
 
-  type UploadImage = { name: string; mime: string; dataUrl: string };
+  type UploadAttachment = { name: string; mime: string; dataUrl: string; text?: string };
   const CHAT_STORAGE_KEY = "lifestack:assistant:thread:v1";
-  const MAX_PENDING_IMAGES = 50;
+  const MAX_PENDING_ATTACHMENTS = 50;
   const MAX_IMAGE_SIDE_PX = 1280;
   const IMAGE_QUALITY = 0.72;
+  const MAX_ATTACHMENT_TEXT_CHARS = 24000;
+  const ATTACHMENT_ACCEPT =
+    "image/*,.csv,text/csv,application/csv,text/plain,.txt,text/tab-separated-values,.tsv,application/json,.json,application/pdf,.pdf,text/xml,application/xml,.xml";
   type Turn = {
     role: "user" | "assistant";
     content: string;
@@ -23,7 +26,7 @@
   };
   type PendingRequest = {
     content: string;
-    attachments: UploadImage[];
+    attachments: UploadAttachment[];
     turnIndex: number;
   };
   type ArmedApproval = {
@@ -38,7 +41,7 @@
   let scroller: HTMLDivElement | null = $state(null);
   let box: HTMLTextAreaElement | null = $state(null);
   let picker: HTMLInputElement | null = $state(null);
-  let pendingImages = $state<UploadImage[]>([]);
+  let pendingAttachments = $state<UploadAttachment[]>([]);
   let persistenceReady = $state(false);
   let pendingRequest = $state<PendingRequest | null>(null);
   let canRetry = $state(false);
@@ -83,8 +86,8 @@
     finance: "What were my biggest spending categories last month?",
     energy: "Show my electricity cost by month this year.",
     fuel: "What is my average fuel economy in L/100km?",
-    mobility: "I uploaded Lime scooter and bike receipt screenshots. Extract them and save them as mobility data.",
-    food: "I uploaded an Uber Eats screenshot. Extract the order and save it as food_order data.",
+    mobility: "I uploaded ride receipts. Extract them and save them as mobility data.",
+    food: "I uploaded a food receipt. Extract the order and save it as food_order data.",
   };
 
   const suggestions = $derived(
@@ -110,9 +113,58 @@
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
       reader.onload = () => resolve(String(reader.result ?? ""));
-      reader.onerror = () => reject(new Error("Could not read image"));
+      reader.onerror = () => reject(new Error("Could not read file"));
       reader.readAsDataURL(file);
     });
+  }
+
+  function readAsText(file: File): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result ?? ""));
+      reader.onerror = () => reject(new Error("Could not read text file"));
+      reader.readAsText(file);
+    });
+  }
+
+  function inferMimeFromName(name: string): string {
+    const lower = name.toLowerCase();
+    if (lower.endsWith(".csv")) return "text/csv";
+    if (lower.endsWith(".tsv")) return "text/tab-separated-values";
+    if (lower.endsWith(".txt")) return "text/plain";
+    if (lower.endsWith(".json")) return "application/json";
+    if (lower.endsWith(".xml")) return "application/xml";
+    if (lower.endsWith(".pdf")) return "application/pdf";
+    return "application/octet-stream";
+  }
+
+  function normalizeAttachmentMime(file: File): string {
+    const raw = file.type?.trim();
+    return raw || inferMimeFromName(file.name);
+  }
+
+  function isTextLikeMime(mime: string): boolean {
+    const lower = mime.toLowerCase();
+    return (
+      lower.startsWith("text/") ||
+      lower === "application/json" ||
+      lower === "application/csv" ||
+      lower === "text/csv" ||
+      lower === "text/tab-separated-values" ||
+      lower === "application/xml" ||
+      lower === "text/xml"
+    );
+  }
+
+  function textToDataUrl(text: string, mime: string): string {
+    return `data:${mime};charset=utf-8,${encodeURIComponent(text)}`;
+  }
+
+  function clipAttachmentText(text: string): string {
+    const trimmed = text.trim();
+    if (!trimmed) return "";
+    if (trimmed.length <= MAX_ATTACHMENT_TEXT_CHARS) return trimmed;
+    return `${trimmed.slice(0, MAX_ATTACHMENT_TEXT_CHARS)}\n...[truncated]`;
   }
 
   function imageNameAsJpeg(name: string): string {
@@ -130,7 +182,7 @@
     });
   }
 
-  async function optimizeImage(file: File): Promise<UploadImage> {
+  async function optimizeImage(file: File): Promise<UploadAttachment> {
     const originalDataUrl = await readAsDataUrl(file);
     const img = await loadImage(originalDataUrl);
     const srcWidth = img.naturalWidth || img.width;
@@ -150,25 +202,44 @@
     return { name: imageNameAsJpeg(file.name), mime: "image/jpeg", dataUrl };
   }
 
-  async function addImages(list: FileList | null) {
+  async function toAttachment(file: File): Promise<UploadAttachment> {
+    const mime = normalizeAttachmentMime(file);
+    if (mime.startsWith("image/")) return optimizeImage(file);
+    if (isTextLikeMime(mime)) {
+      const text = clipAttachmentText(await readAsText(file));
+      return {
+        name: file.name,
+        mime,
+        dataUrl: textToDataUrl(text, mime),
+        text,
+      };
+    }
+    return {
+      name: file.name,
+      mime,
+      dataUrl: await readAsDataUrl(file),
+    };
+  }
+
+  async function addAttachments(list: FileList | null) {
     if (!list || !list.length || busy) return;
-    const files = [...list].filter((f) => f.type.startsWith("image/"));
+    const files = [...list];
     if (files.length === 0) return;
-    const remaining = MAX_PENDING_IMAGES - pendingImages.length;
+    const remaining = MAX_PENDING_ATTACHMENTS - pendingAttachments.length;
     if (remaining <= 0) {
       if (picker) picker.value = "";
       return;
     }
-    const loaded: UploadImage[] = [];
+    const loaded: UploadAttachment[] = [];
     for (const file of files.slice(0, remaining)) {
-      loaded.push(await optimizeImage(file));
+      loaded.push(await toAttachment(file));
     }
-    pendingImages = [...pendingImages, ...loaded];
+    pendingAttachments = [...pendingAttachments, ...loaded];
     if (picker) picker.value = "";
   }
 
-  function clearImages() {
-    pendingImages = [];
+  function clearAttachments() {
+    pendingAttachments = [];
     if (picker) picker.value = "";
   }
 
@@ -210,18 +281,18 @@
 
   async function send(text: string) {
     const content = text.trim();
-    if ((!content && pendingImages.length === 0) || busy) return;
+    if ((!content && pendingAttachments.length === 0) || busy) return;
     errorText = null;
     canRetry = false;
     armedApproval = null;
-    const attachments = [...pendingImages];
+    const attachments = [...pendingAttachments];
     const previousThread = thread;
     const turnIndex = previousThread.length;
     const userTurn: Turn = { role: "user", content, attachmentCount: attachments.length };
     thread = [...previousThread, userTurn];
     pendingRequest = { content, attachments, turnIndex };
     input = "";
-    pendingImages = [];
+    pendingAttachments = [];
     if (box) box.style.height = "auto";
     busy = true;
     scrollDown();
@@ -308,7 +379,7 @@
     errorText = null;
     canRetry = false;
     input = "";
-    pendingImages = [];
+    pendingAttachments = [];
     pendingRequest = null;
     armedApproval = null;
   }
@@ -477,8 +548,8 @@
         <div class="hero">
           <h1>Ask your data anything</h1>
           <p class="lede">
-            One assistant over every module. Ask questions, or upload screenshots from apps like Uber,
-            Bolt, and Lime to extract entries and save them directly into your local data stack.
+            One assistant over every module. Ask questions, or upload receipts, CSV files, and
+            screenshots to extract entries and save them directly into your local data stack.
           </p>
           {#if suggestions.length}
             <div class="suggest">
@@ -497,7 +568,7 @@
                 <div class="said">{t.content}</div>
                 {#if t.attachmentCount}
                   <p class="attach-summary">
-                    {t.attachmentCount} screenshot{t.attachmentCount === 1 ? "" : "s"} attached
+                    {t.attachmentCount} file{t.attachmentCount === 1 ? "" : "s"} attached
                   </p>
                 {/if}
               </div>
@@ -647,29 +718,38 @@
           New chat
         </button>
       {/if}
-      {#if pendingImages.length}
+      {#if pendingAttachments.length}
         <div class="pending-summary">
-          <span>{pendingImages.length} screenshot{pendingImages.length === 1 ? "" : "s"} selected</span>
-          <button class="clear-pending" type="button" onclick={clearImages} disabled={busy}>
+          <span>{pendingAttachments.length} file{pendingAttachments.length === 1 ? "" : "s"} selected</span>
+          <button class="clear-pending" type="button" onclick={clearAttachments} disabled={busy}>
             Clear
           </button>
         </div>
       {/if}
+      <details class="hint">
+        <summary>Import help</summary>
+        <p>
+          Upload files (up to {MAX_PENDING_ATTACHMENTS} per prompt), ask for extraction, and the assistant
+          can save or delete records in your local database when you explicitly request it. CSV and text
+          files are parsed directly; images are sent to vision-capable models. Enter to send, Shift+Enter
+          for a new line.
+        </p>
+      </details>
       <div class="field">
         <input
           bind:this={picker}
           class="picker"
           type="file"
-          accept="image/*"
+          accept={ATTACHMENT_ACCEPT}
           multiple
-          onchange={(e) => addImages((e.currentTarget as HTMLInputElement).files)}
+          onchange={(e) => addAttachments((e.currentTarget as HTMLInputElement).files)}
         />
         <button
           class="attach"
           type="button"
           onclick={() => picker?.click()}
-          disabled={busy || pendingImages.length >= MAX_PENDING_IMAGES}
-          aria-label="Upload screenshots"
+          disabled={busy || pendingAttachments.length >= MAX_PENDING_ATTACHMENTS}
+          aria-label="Upload files"
         >
           +
         </button>
@@ -685,7 +765,7 @@
         <button
           class="send"
           onclick={() => send(input)}
-          disabled={busy || (!input.trim() && pendingImages.length === 0)}
+          disabled={busy || (!input.trim() && pendingAttachments.length === 0)}
           aria-label="Send message"
         >
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -693,11 +773,6 @@
           </svg>
         </button>
       </div>
-      <p class="hint">
-        Upload screenshots (up to {MAX_PENDING_IMAGES} per prompt), ask for extraction, and the assistant
-        can save or delete records in your local database when you explicitly request it. Enter to send,
-        Shift+Enter for a new line.
-      </p>
     </div>
   </div>
 </div>
@@ -1083,11 +1158,43 @@
     cursor: not-allowed;
   }
   .hint {
-    margin: var(--s2) 0 0;
+    margin: 0 0 var(--s2);
     max-width: 60ch;
-    font-size: 13px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: color-mix(in oklab, var(--surface) 92%, var(--bg));
+    overflow: hidden;
+  }
+  .hint summary {
+    list-style: none;
+    cursor: pointer;
+    padding: 7px 10px;
+    font-size: 12px;
+    line-height: 1.3;
+    color: var(--text-faint);
+    user-select: none;
+  }
+  .hint summary::-webkit-details-marker {
+    display: none;
+  }
+  .hint summary::before {
+    content: "›";
+    display: inline-block;
+    margin-right: 6px;
+    transition: transform 140ms ease;
+  }
+  .hint[open] summary::before {
+    transform: rotate(90deg);
+  }
+  .hint summary:hover {
+    color: var(--text-dim);
+  }
+  .hint p {
+    margin: 0;
+    padding: 0 10px 9px 22px;
+    font-size: 12.5px;
     line-height: 1.45;
-    color: var(--text);
+    color: var(--text-dim);
   }
   .attach-summary {
     margin: var(--s2) 0 0;
